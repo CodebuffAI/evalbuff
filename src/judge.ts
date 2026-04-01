@@ -5,11 +5,7 @@ import path from 'path'
 import { Codex } from '@openai/codex-sdk'
 import { z } from 'zod/v4'
 
-import { formatCriteriaForPrompt } from './criteria'
-
 import type { ThreadItem } from '@openai/codex-sdk'
-import type { QualityCriteria } from './criteria'
-import type { EvalCommitV2 } from './types'
 
 export const JudgingResultSchema = z.object({
   analysis: z
@@ -53,18 +49,15 @@ export type ReviewerAgentType = 'claude' | 'codex' | 'gemini'
 const RESULT_FILE_NAME = 'evalbuff-review-result.json'
 
 function buildReviewerPrompt(input: {
-  commit?: EvalCommitV2
   taskPrompt: string
-  contextFiles?: Record<string, string>
   agentDiff: string
   groundTruthDiff?: string
   error?: string
-  criteria?: QualityCriteria
   docsDir?: string
 }): string {
-  const { commit, taskPrompt, contextFiles, agentDiff, groundTruthDiff, error, criteria, docsDir } = input
+  const { taskPrompt, agentDiff, groundTruthDiff, error, docsDir } = input
 
-  const groundTruthSection = groundTruthDiff
+  const groundTruth = groundTruthDiff
     ? `## Ground Truth Changes (One valid implementation)
 ${groundTruthDiff}`
     : `## Ground Truth
@@ -73,25 +66,6 @@ No reference implementation is available. You must judge the agent's work solely
 - Does the feature actually work when you test it?
 - Are there errors in the logs?
 - Does it handle edge cases?`
-
-  const contextFilesContent = contextFiles
-    ? Object.entries(contextFiles)
-        .map(([filePath, content]) => `### ${filePath}\n\`\`\`\n${content}\n\`\`\``)
-        .join('\n\n')
-    : ''
-
-  // Legacy support: build ground truth from commit fileDiffs if no explicit groundTruthDiff
-  const groundTruth = groundTruthDiff
-    ? groundTruthSection
-    : commit?.fileDiffs
-      ? `## Ground Truth Changes (One valid implementation)\n${commit.fileDiffs
-          .map(({ path: p, diff }) => `### ${p}\n\`\`\`diff\n${diff}\n\`\`\``)
-          .join('\n\n')}`
-      : groundTruthSection
-
-  const criteriaText = criteria
-    ? formatCriteriaForPrompt(criteria)
-    : ''
 
   const docsSection = docsDir
     ? `\n## Project Docs\nRead the docs in the \`docs/\` directory and \`AGENTS.md\` for project-specific patterns and conventions before reviewing.\n`
@@ -104,7 +78,7 @@ No reference implementation is available. You must judge the agent's work solely
 You have been given a coding task and an AI agent's attempt. Your job is to:
 
 1. **Read the project docs** (if present) to understand conventions and patterns
-2. **Review the agent's diff** ${groundTruthDiff || commit?.fileDiffs ? 'against the ground truth' : 'for correctness and completeness'}
+2. **Review the agent's diff** ${groundTruthDiff ? 'against the ground truth' : 'for correctness and completeness'}
 3. **Actually test the changes** end-to-end:
    - Start the application if possible (check package.json for start/dev scripts)
    - Use browser tools, curl, or the appropriate client to exercise the feature
@@ -129,8 +103,6 @@ ${docsSection}
 ## User Prompt (What the agent was asked to do)
 ${taskPrompt}
 
-${contextFilesContent ? `## Context Files (from parent commit)\n${contextFilesContent}` : ''}
-
 ${groundTruth}
 
 ## Agent's Changes (What the agent actually did)
@@ -138,7 +110,6 @@ ${groundTruth}
 ${agentDiff || '(No changes made)'}
 \`\`\`
 ${error ? `\n## Error Encountered During Agent Run\n${error}\n` : ''}
-${criteriaText}
 
 ## Required Output
 
@@ -312,59 +283,12 @@ function salvagePartialResult(raw: any): JudgingResult | null {
 
 // --- Public API ---
 
-export interface JudgeCommitResultInput {
-  commit: EvalCommitV2
-  contextFiles: Record<string, string>
-  agentDiff: string
-  repoDir: string
-  error?: string
-  criteria?: QualityCriteria
-  reviewerAgents?: ReviewerAgentType[]
-  env?: Record<string, string>
-}
-
-/**
- * Judge a commit result by running Codex reviewer agents in the repo.
- * Each reviewer can read docs, run the app, test E2E, and write a result file.
- */
-export async function judgeCommitResult(
-  input: JudgeCommitResultInput,
-): Promise<JudgingResult> {
-  const {
-    commit,
-    contextFiles,
-    agentDiff,
-    repoDir,
-    error,
-    criteria,
-    reviewerAgents = ['codex', 'codex'],
-    env,
-  } = input
-
-  const prompt = buildReviewerPrompt({
-    commit,
-    taskPrompt: commit.prompt,
-    contextFiles,
-    agentDiff,
-    error,
-    criteria,
-    docsDir: fs.existsSync(path.join(repoDir, 'docs')) ? repoDir : undefined,
-  })
-
-  return runReviewersAndAggregate(prompt, repoDir, reviewerAgents, env)
-}
-
-/**
- * Judge an agent's work on a task prompt — no ground truth commit needed.
- * Used for both commit-learning mode (with ground truth diff) and prompt mode (without).
- */
 export interface JudgeTaskResultInput {
   taskPrompt: string
   agentDiff: string
   groundTruthDiff?: string
   repoDir: string
   error?: string
-  criteria?: QualityCriteria
   reviewerAgents?: ReviewerAgentType[]
   env?: Record<string, string>
 }
@@ -378,7 +302,6 @@ export async function judgeTaskResult(
     groundTruthDiff,
     repoDir,
     error,
-    criteria,
     reviewerAgents = ['codex', 'codex'],
     env,
   } = input
@@ -388,7 +311,6 @@ export async function judgeTaskResult(
     agentDiff,
     groundTruthDiff,
     error,
-    criteria,
     docsDir: fs.existsSync(path.join(repoDir, 'docs')) ? repoDir : undefined,
   })
 

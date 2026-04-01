@@ -2,7 +2,22 @@ import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
-import { generatePrompt } from './llm'
+import { createAnthropic } from '@ai-sdk/anthropic'
+import { generateText } from 'ai'
+
+const anthropic = createAnthropic()
+
+async function generatePrompt(
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string> {
+  const result = await generateText({
+    model: anthropic('claude-sonnet-4-6'),
+    system: systemPrompt,
+    prompt: userPrompt,
+  })
+  return result.text.trim()
+}
 
 export interface CommitTask {
   sha: string

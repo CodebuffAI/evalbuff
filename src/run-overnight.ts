@@ -21,8 +21,9 @@ import {
   planFeatures,
   carveFeature,
 } from './carve-features'
-import { judgeWithOpenAI } from './judge-openai'
 import { ClaudeRunner } from './runners/claude'
+import { judgeTaskResult } from './judge'
+import { compressTrace } from './trace-compressor'
 
 import type { CarvedFeature, CarveCandidate, FileOperation } from './carve-features'
 import type { JudgingResult } from './judge'
@@ -256,6 +257,7 @@ async function runAgentOnCarve(opts: {
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'overnight-eval-'))
   const repoDir = path.join(tempDir, 'repo')
+  let traceDir: string | undefined
 
   try {
     // Clone the repo
@@ -313,16 +315,20 @@ async function runAgentOnCarve(opts: {
       }
     }
 
-    const agentTrace = result.steps.map((step) => JSON.stringify(step)).join('\n')
+    const rawTrace = result.steps.map((step) => JSON.stringify(step)).join('\n')
+    traceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-traces-'))
+    const compressed = compressTrace(rawTrace, traceDir)
+    const agentTrace = compressed.inline
 
-    // Judge with GPT-5.4
-    console.log(`  [Run ${idx + 1}/${total}] Judging ${feature.id} with GPT-5.4...`)
+    // Judge with Codex reviewer agents
+    console.log(`  [Run ${idx + 1}/${total}] Judging ${feature.id} with Codex reviewers...`)
     let judging: JudgingResult
     try {
-      judging = await judgeWithOpenAI({
+      judging = await judgeTaskResult({
         taskPrompt: feature.prompt,
         agentDiff: result.diff,
         groundTruthDiff,
+        repoDir: repoDir,
       })
     } catch (judgeError) {
       const errMsg = judgeError instanceof Error ? judgeError.message : String(judgeError)
@@ -352,6 +358,9 @@ async function runAgentOnCarve(opts: {
   } finally {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true })
+    } catch { /* ignore */ }
+    try {
+      if (traceDir) fs.rmSync(traceDir, { recursive: true, force: true })
     } catch { /* ignore */ }
   }
 }
