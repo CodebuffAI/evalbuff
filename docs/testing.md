@@ -36,14 +36,37 @@ const SKIP = !process.env.OPENAI_API_KEY ||
   !(process.env.CLAUDE_CODE_KEY || process.env.ANTHROPIC_API_KEY)
 
 it.skipIf(SKIP)('runs full pipeline', async () => {
-  const repoDir = createTestRepo()
-  await runEvalbuff({ repoPath: repoDir, n: 1, parallelism: 1, loops: 1, codingModel: 'sonnet', docsModel: 'sonnet' })
-  const logDir = findNewRunDir()
-  expect(fs.existsSync(path.join(logDir, 'summary.json'))).toBeTrue()
+  let repoDir = ''
+  let logDir = ''
+  try {
+    repoDir = createTestRepo()
+    logDir = await captureRunDir(() =>
+      runEvalbuff({ repoPath: repoDir, n: 1, parallelism: 1, loops: 1, codingModel: 'sonnet', docsModel: 'sonnet' })
+    )
+    expect(fs.existsSync(path.join(logDir, 'summary.json'))).toBeTrue()
+  } finally {
+    if (repoDir) fs.rmSync(repoDir, { recursive: true, force: true })
+    if (logDir) fs.rmSync(logDir, { recursive: true, force: true })
+  }
 }, 90 * 60_000)
 ```
 
 Limit `beforeAll`/`afterAll` to cheap fixture setup and cleanup.
+
+### Temp Directory Safety
+
+The orchestrator creates its log directory in `os.tmpdir()` as `evalbuff-run-<ISO timestamp>`, not inside the source repo. Tests that assert on artifacts must:
+
+- Capture that directory with a failure-safe helper and always clean it in `finally`, even when the orchestrator throws before assertions run
+- Never scan global tmp to find "the newest" run directory — this is unsafe under concurrent runs because the test can pick up another run's artifacts
+
+### Nullable Agent Returns
+
+Live agent calls (e.g., `carveFeature()`) can genuinely return `null` due to model non-determinism. Tests should:
+
+- Call multiple candidates and collect results, allowing individual candidates to fail
+- Use a success criterion like "at least one candidate produced a valid result" rather than "every candidate succeeded"
+- Log skipped/null candidates for debugging rather than asserting they all pass
 
 ## CLI Command Testing
 
@@ -52,6 +75,16 @@ Every new standalone command needs local coverage for both argument validation a
 - Keep the CLI thin and test by setting `process.argv`, mocking heavy modules with `mock.module(...)`, then dynamically importing the CLI entrypoint
 - Required assertions: missing required flags, invalid repo paths, non-git repos, output file creation, expected JSON fields
 - Live-agent E2E tests are additional coverage, not the only coverage
+- A CLI change is incomplete unless three artifacts land together: the runnable file in `src/`, a matching `package.json` script (if applicable), and README/docs usage with the exact flag spellings and defaults
+- Validate `--repo` in order: path exists → path is a git work tree (`git rev-parse --show-toplevel`) → numeric flags parse cleanly. This prevents low-level provider errors from leaking to users
+
+### Scope Control for Test Tasks
+
+When adding a new test suite, keep the diff limited to the new test file and truly required support changes:
+
+- Do not edit neighboring fixture files or other E2E test repos
+- Do not regenerate `bun.lock` unless `package.json` changed in the same diff
+- Pre-submit checklist for test-only tasks: `git diff --stat`, `bun install --frozen-lockfile`, `bun run typecheck`, the focused new test, and `bun run test:all`
 
 ## Key Contracts Worth Testing
 
@@ -85,16 +118,40 @@ Deterministic local test (no API keys needed):
 ### Runner Adapter
 For any new runner, test with a mocked SDK client plus a temp git repo:
 - Internal events (e.g., `set_messages`) are filtered
-- Provider-native tool names are normalized to canonical names
-- `extractDocsRead()` recovers docs from captured steps
+- Provider-native tool names are normalized to canonical names (`shell`, `read_file`, `file_change`)
+- `extractDocsRead()` recovers docs from normalized steps
 - `totalCostUsd` is derived from provider session metadata
 - Diff capture includes all edit types
-- Failure paths write structured JSON dumps without throwing
+- Failure paths: thrown exceptions and provider-reported failures both write a structured JSON dump containing `prompt`, `steps`, and serialized `error` fields, and cause `run()` to reject without crashing the process
 
 ### Infrastructure Failures
 - `runAgentOnCarve()` converts clone/setup failures into `score = -1` results instead of throwing
 - Temp directories are always cleaned up in `finally`
 - Source repos are not left with staging side effects
+
+### Artifact Field Propagation
+When adding a new field to a shared interface (e.g., `docsRead` on `TaskResult`):
+- Update the interface definition
+- Update every constructor and fallback that returns that type, including infra-failure paths
+- Update every persistence path (artifact files, `saveRoundResults()`, `saveSummary()`)
+- Update every rendering path (markdown report sections)
+- Write a deterministic local test that builds synthetic data, calls the persistence helpers, and asserts the field appears in all saved artifacts and report output
+
+### Result File Parsing
+For agent-produced JSON files (`evalbuff-carve-result.json`, `evalbuff-review-result.json`):
+- Valid file → parsed JSON returned
+- Missing file → fallback to parsing `finalResponse` text
+- Invalid/corrupt file → fallback to parsing `finalResponse` text
+- Cleanup failure → must not override a successful parse (separate parse from cleanup in the `finally` flow)
+- Temp file removed in both success and fallback cases
+- Test with a stubbed agent client, not only live-agent E2E
+
+### Bootstrap / Init Script Integration
+Shell-based setup helpers (e.g., `setup.sh`) need disposable-git integration coverage:
+- Run the helper in a cloned checkout and assert environment files are copied
+- Run the helper in a `git worktree add` checkout and assert it discovers the primary worktree (not `origin`)
+- Assert the documented invocation (`bash setup.sh`) succeeds from checkout root
+- Stub heavy commands (e.g., `bun`) via `PATH` with a tiny script that logs arguments to avoid network access
 
 ## Carve Compatibility Tests
 

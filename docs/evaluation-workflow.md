@@ -115,7 +115,7 @@ export async function judgeTaskResult(input: {
 
 - The reviewer agent writes JSON to `evalbuff-review-result.json` in `repoDir`
 - After the run, the judge reads and validates the file with Zod
-- On validation failure: `salvagePartialResult()` recovers best-effort results when `overallScore` is present
+- On validation failure: `salvagePartialResult()` recovers best-effort results when `overallScore` is present. Salvage rule: if `overallScore` exists but `completionScore`, `codeQualityScore`, or `e2eScore` are missing, those missing fields default to `overallScore` (not `0`). Missing arrays default to `[]`.
 - On complete failure: returns fallback all-zero `JudgingResult`
 - The reviewer runs in the repo checkout containing the agent's code changes — launching it in an empty directory is invalid for E2E testing
 - `docSuggestions` are actionable documentation edits (distinct from `weaknesses`) stored on every `TaskResult.judging` object
@@ -154,11 +154,29 @@ The next eval round picks up these uncommitted docs via `copyDocsIntoRepo(docsSo
 Both the planner/carver (`evalbuff-carve-result.json`) and judge (`evalbuff-review-result.json`) use the same pattern for agent-produced JSON:
 
 1. Agent is instructed to write a JSON file at a known path in `repoDir`
-2. After the run, read the file: `const raw = fs.readFileSync(resultPath, 'utf-8')`
-3. Parse with `JSON.parse(raw)` and validate (Zod or type assertion)
-4. Cleanup (`fs.rmSync`) in a `finally` block — never let cleanup failure override a successful parse
-5. If the file is missing, fall back to parsing JSON from the agent's response text
-6. When parsing prose that may wrap JSON, extract the JSON object (e.g., regex for `{...}` containing expected keys), don't slice to the last `}`
+2. After the run, attempt to read and parse the file
+3. Cleanup (`fs.rmSync`) in a `finally` block — never let cleanup failure override a successful parse
+4. If the file is missing or invalid, fall back to parsing JSON from the agent's response text
+5. When parsing prose that may wrap JSON, extract the JSON object (e.g., regex for `{...}` containing expected keys), don't slice to the last `}`
+
+**Critical**: file parsing and cleanup must be separated so cleanup failure never discards a successfully parsed result:
+
+```ts
+let parsed: T | null = null
+if (fs.existsSync(resultPath)) {
+  try {
+    parsed = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as T
+  } catch (err) {
+    console.warn('Parse failed, will fall back to response text')
+  } finally {
+    fs.rmSync(resultPath, { force: true })
+  }
+  if (parsed) return parsed
+}
+// Fall back to parsing finalResponse
+```
+
+Do not use `unlinkSync()` inside the parse `try` — an unlink error can incorrectly turn a valid file into a failed run.
 
 ## Run Report Contract
 

@@ -25,13 +25,22 @@ Use the prompt to understand intent, then verify against:
 
 When a carve adds or restores a helper module, the file path, export names, function signature, and returned object field names are part of the public contract. Match them exactly.
 
-1. **Create the exact file path** from the diff — do not move files to different locations
-2. **Export the exact symbol names** — do not rename `getErrorObject` to `toSerializableError`
-3. **Preserve required top-level fields** on returned objects — do not restructure the shape
-4. **Add only the minimal supporting code** needed to satisfy the carve
-5. **Verify imports** — if the carve shows other files importing from the restored module, those imports must work with your implementation
+1. **Create the exact file path** from the diff — do not move files to different locations. The module path is part of the public API: if the diff names `src/test-repo-utils.ts`, do not substitute `src/eval-helpers.ts`
+2. **Export the exact symbol names** — do not rename `getErrorObject` to `toSerializableError`, or `withTestRepoAndParent` to `withCommitEval`
+3. **Preserve exact signatures and return types** — do not change `Promise<T | null>` to throwing behavior, or add extra parameters not in the diff
+4. **Preserve required top-level fields** on returned objects — do not restructure the shape
+5. **Add only the minimal supporting code** needed to satisfy the carve
+6. **Verify imports** — if the carve shows other files importing from the restored module, those imports must work with your implementation
 
-Example: if the carve shows `src/vendor/error.ts` exporting `getErrorObject(error: unknown, options?: { includeRawError?: boolean }): ErrorObject`, implement that exact signature with those exact fields.
+### Pre-Implementation Verification
+
+Before writing code, grep both `docs/` and `src/` for the target file path and symbol names to confirm the expected contract. After implementing, verify the exact exported module path and symbols:
+
+```bash
+bun --eval "const m = await import('./src/<module>.ts'); console.log(typeof m.<exportName>)"
+```
+
+If docs or the diff reference a helper name, grep `src/` for all importers — every importer must compile.
 
 ## What Not To Do
 

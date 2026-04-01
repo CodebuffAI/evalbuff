@@ -36,12 +36,19 @@ Used in two places:
 
 Returns sorted, deduplicated list of doc paths read by an agent.
 
-Supported tool names:
+Supported tool names (canonical only — see `docs/runners.md` for normalization):
 - `Read` — reads `input.file_path`
 - `read_file` — reads `input.path`
-- `shell` — parses command string for multiple doc paths (e.g., `cat docs/testing.md AGENTS.md`)
+- `shell` — parses the command string for all doc path mentions (e.g., `cat docs/testing.md AGENTS.md`)
 
-Only paths matching `docs/**` or `AGENTS.md` or `CLAUDE.md` are collected. Works across Claude, Codex, and Codebuff traces because it uses canonical tool names (see `docs/runners.md` for normalization).
+Only paths matching `docs/**`, `AGENTS.md`, or `CLAUDE.md` are collected.
+
+### Path Normalization
+
+All paths are normalized to repo-relative form before deduplication:
+- Absolute paths like `/tmp/x/docs/reference.md` → `docs/reference.md`
+- Relative paths like `./docs/extra.md` → `docs/extra.md`
+- Shell commands may mention multiple paths: `cat docs/guide.md AGENTS.md && sed -n '1,5p' ./docs/extra.md` → `["AGENTS.md", "docs/extra.md", "docs/guide.md"]`
 
 ## `getGroundTruthDiff(feature: CarvedFeature): string`
 

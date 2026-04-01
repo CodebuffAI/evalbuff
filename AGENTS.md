@@ -56,8 +56,26 @@ Documentation in `docs/` must describe the current codebase, not planned future 
 
 - Keep changes narrowly scoped to the task. Do not add unrelated docs, refactors, or dependency changes.
 - When rebuilding a carved feature, match the exact file path, export names, function signatures, and field names from the ground truth diff. Do not rename contracts or "improve" the API.
-- When writing tests, limit the diff to the test file and truly required support changes. Do not regenerate `bun.lock` unless `package.json` changed.
-- Pre-submit check: compare `git diff --stat` to the task scope. Every extra file touched must be directly required.
+- **Lockfile rule**: Do not modify `bun.lock` unless `package.json` changed in the same diff. Use `bun install --frozen-lockfile` to verify consistency. If it reveals pre-existing drift unrelated to the task, report it separately instead of silently fixing it.
+
+### Cross-File Wiring
+
+When a change touches multiple files (new helper, new interface field, new pipeline stage), all consumers must be updated together:
+
+- Grep `src/` for every importer of a changed module before finishing
+- Every public function signature must match at all call sites
+- New fields on shared interfaces (e.g., `TaskResult`, `CarvedFeature`) must be threaded through all constructors, fallback paths (including `score = -1` infra-failure paths), and persistence/rendering code
+- A change that adds an export without wiring it to at least one real call site is incomplete
+
+### Pre-Submit Verification
+
+Before finishing any task, run this checklist:
+
+1. `bun install --frozen-lockfile` — catches dependency drift
+2. `bun run typecheck` — catches cross-file wiring errors
+3. `bun test src/__tests__/<focused-file>` — the test most relevant to the change
+4. `git diff --stat` — every file touched must be justified by the task scope
+5. For new/modified exports: verify the import works (`bun --eval "await import('./src/<module>.ts')"` or grep for importers)
 
 ### CLI Contracts
 

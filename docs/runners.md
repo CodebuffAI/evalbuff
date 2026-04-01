@@ -33,13 +33,40 @@ Adding `src/runners/<name>.ts` and exporting from `src/runners/index.ts` is **no
 const runner = new ClaudeRunner(repoDir, {}, model, 'medium')
 ```
 
-To add a new runner, update the selection logic there. Example pattern:
+To add a new runner, update the selection logic there.
+
+### Model Routing
+
+Model routing must use precise checks. Do **not** use broad prefix matches like `model.startsWith('o')` — Claude aliases like `opus` also start with `o`. Use explicit patterns:
 
 ```ts
-const runner = model.startsWith('gpt-') || model.startsWith('o')
+const isOpenAIModel = model.startsWith('gpt-') || /^o\d/.test(model)
+const runner = isOpenAIModel
   ? new CodexRunner(repoDir)
   : new ClaudeRunner(repoDir, {}, model, 'medium')
 ```
+
+### Optional SDK Imports
+
+Adding a runner backed by a new provider SDK must not break importing `src/eval-runner.ts` or `src/run-evalbuff.ts` when that provider is not installed or selected. Load the runner lazily inside the model-selection branch:
+
+```ts
+const runner = model.startsWith('codebuff')
+  ? new (await import('./runners/codebuff')).CodebuffRunner(repoDir, {}, model)
+  : new ClaudeRunner(repoDir, {}, model, 'medium')
+```
+
+Every new dependency added to `package.json` must appear in `bun.lock`, and verification must include an import smoke test (e.g., `bun test src/__tests__/eval-runner.test.ts`) so missing SDKs are caught before merge.
+
+### Environment Credentials
+
+If a runner constructor accepts `env: Record<string, string>` for per-run credential overrides, it must pass credentials to the SDK as `process.env.<KEY> || env.<KEY>`:
+
+```ts
+new ProviderSDK({ apiKey: process.env.PROVIDER_API_KEY || env.PROVIDER_API_KEY })
+```
+
+Test pattern: construct the runner with only the per-run env set and assert the SDK received that key.
 
 ## Required Behavior
 
@@ -104,6 +131,18 @@ case 'file_change':
 Codebuff-native tools (`run_terminal_command`, `read_files`, `read_docs`, `read_subtree`, `str_replace`, `write_file`, `apply_patch`, `propose_str_replace`, `propose_write_file`) must be mapped to the canonical names. Internal housekeeping events like `set_messages` must be filtered out.
 
 If a new tool name is introduced by a provider, update `extractDocsRead()` in `src/eval-helpers.ts` and any trace consumers.
+
+### Compound Events (MCP, Multi-Step Tools)
+
+For provider events that contain both a tool invocation and its result (e.g., MCP calls), emit **both** a `tool_call` and a `tool_result` step. Preserve provenance in the tool name:
+
+```ts
+// MCP tool call
+steps.push({ type: 'tool_call', toolName: `mcp:${server}:${tool}`, input: args })
+steps.push({ type: 'tool_result', toolName: `mcp:${server}:${tool}`, output: item.result || item.error })
+```
+
+This ensures trace consumers can reconstruct the full interaction.
 
 ## Trace Persistence
 
