@@ -63,7 +63,19 @@ Rules:
 - The goal is a minimal, high-signal set of docs that a coding agent can use to build ANY feature, including ones that don't exist yet.
 - Less is more — 5 great docs are better than 15 mediocre ones.
 - Document patterns, conventions, and architectural rules — not specific feature implementations.
-- Be specific about file paths, directory structure, and conventions — but generic about what gets built.`
+- Be specific about file paths, directory structure, and conventions — but generic about what gets built.
+
+## Docs Must Match Source Code
+
+Docs that describe nonexistent code are WORSE than no docs at all — they actively mislead coding agents and cause them to fail.
+
+Before writing any doc that references a helper, function, type, or script:
+1. **grep for the exact symbol name** to confirm it exists. If it doesn't exist, DO NOT document it.
+2. **Never document aspirational/future behavior.** Only document what the code does RIGHT NOW.
+3. **If a judge suggestion references a helper that doesn't exist**, document the PATTERN the agent should follow instead — not a fictional API.
+
+Wrong: "Use \`captureGitDiff()\` from src/eval-helpers.ts to capture diffs"  (if it doesn't exist)
+Right: "Diff capture should use an explicit base SHA recorded before the agent runs"  (describes the pattern)`
 
   try {
     execSync(`git clone --no-checkout "${repoPath}" "${repoDir}"`, { stdio: 'ignore' })
