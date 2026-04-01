@@ -16,7 +16,7 @@ Evalbuff improves a coding agent's performance by iteratively optimizing project
 ## Usage
 
 ```bash
-bun run src/run-overnight.ts \
+bun run src/run-evalbuff.ts \
   --repo /path/to/repo \
   [--n 5] \
   [--parallelism 3] \
@@ -28,7 +28,11 @@ bun run src/run-overnight.ts \
 
 | File | Role |
 |------|------|
-| `run-overnight.ts` | Main orchestrator — carve features, run agents, judge, iterate on docs |
+| `run-evalbuff.ts` | Main orchestrator — carve features, run agents, judge, iterate on docs |
+| `eval-runner.ts` | Core agent execution — clone, carve, run agent, judge a single feature |
+| `eval-helpers.ts` | Pure utilities — carve ops, docs snapshots, ground truth diffs |
+| `docs-refactor.ts` | Docs refactor agent + judge suggestion collection |
+| `report.ts` | Logging and markdown report generation |
 | `carve-features.ts` | Feature carving — identifies and removes features from a codebase |
 | `judge.ts` | Codex-based reviewer agent that judges agent output with E2E testing |
 | `trace-compressor.ts` | Compresses agent traces by extracting large tool results to files |
