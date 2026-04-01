@@ -4,11 +4,10 @@
  * One long pipeline meant to run unattended:
  *   1. Plan features to carve (GPT-5.4 via OpenAI SDK)
  *   2. Carve a random subset of n features (GPT-5.4 via OpenAI SDK)
- *   3. Baseline: rebuild each in parallel (Claude Code + Sonnet), judge (GPT-5.4), get scores + traces
+ *   3. Baseline: rebuild each in parallel (Claude Code + Sonnet), judge (GPT-5.4), get scores + doc suggestions
  *   4. Loop N times:
- *      a. Sequentially: docs-writer agent per task analyzes traces → makes generalizable docs changes (Claude Code + Opus)
- *      b. Holistic docs refactor agent simplifies/merges/compacts all docs (Claude Code + Opus)
- *      c. Re-eval: rebuild in parallel (Claude Code + Sonnet), judge (GPT-5.4), get new scores + traces
+ *      a. Docs refactor agent reads judge suggestions and edits all docs holistically (Claude Code + Opus)
+ *      b. Re-eval: rebuild in parallel (Claude Code + Sonnet), judge (GPT-5.4), get new scores + doc suggestions
  *
  * Usage:
  *   bun run src/run-overnight.ts --repo /path/to/repo [--n 5] [--parallelism 3] [--loops 3] [--init-command "npm install"]
@@ -372,123 +371,67 @@ async function runEvalRound(
   return { round, tasks: results, avgScore, totalCost }
 }
 
-// --- Docs writer agent (Claude Code + Opus) ---
+// --- Collect doc suggestions from judge results ---
 
-async function runDocsWriterAgent(
-  repoPath: string,
-  task: TaskResult,
-  model: string,
-): Promise<void> {
-  console.log(`\n  [DocsWriter] Analyzing ${task.featureId} (score: ${task.score.toFixed(1)})...`)
+function collectDocSuggestions(tasks: TaskResult[]): string {
+  const sections: string[] = []
 
-  // Write context to a temp file in the repo
-  const contextPath = path.join(repoPath, 'EVALBUFF_DOCS_CONTEXT.md')
+  for (const task of tasks) {
+    const suggestions = task.judging.docSuggestions
+    if (!suggestions || suggestions.length === 0) continue
 
-  const contextContent = `# Evalbuff Docs Writer Context
-
-## Task
-The coding agent was asked to rebuild a feature that was carved out of the codebase.
-
-### Task Prompt
-${task.prompt}
-
-### Agent Score: ${task.score.toFixed(1)}/10
-
-### Judge Analysis
-${task.judging.analysis}
-
-### Strengths
-${task.judging.strengths.map((s) => `- ${s}`).join('\n') || '- None noted'}
-
-### Weaknesses
-${task.judging.weaknesses.map((w) => `- ${w}`).join('\n') || '- None noted'}
-
-### Agent's Diff (what the agent produced)
-\`\`\`diff
-${task.diff.slice(0, 20000) || '(No changes made)'}
-\`\`\`
-
-### Agent Trace (reasoning and tool calls, truncated)
-\`\`\`
-${task.trace.slice(0, 30000)}
-${task.trace.length > 30000 ? '\n... (truncated)' : ''}
-\`\`\`
-`
-
-  fs.writeFileSync(contextPath, contextContent)
-
-  const prompt = `Read the file EVALBUFF_DOCS_CONTEXT.md in the current directory. It contains the results of a coding agent's attempt at rebuilding a feature.
-
-Your job: Analyze what went wrong (or right) and make GENERALIZABLE documentation improvements that would help a coding agent perform better on FUTURE similar tasks.
-
-Rules:
-1. ONLY modify files in docs/, AGENTS.md, or CLAUDE.md. Do NOT modify any source code.
-2. Write docs that capture GENERAL PATTERNS, not task-specific fixes. Think: "What would a senior dev tell a new team member?"
-3. Be specific and actionable — reference concrete file paths, patterns, and conventions from this codebase.
-4. Keep docs concise — dense information beats verbose explanations. Every line should be actionable.
-5. If existing docs are stale, outdated, or redundant — clean them up or remove them.
-6. If you see docs that are too verbose, make them more concise.
-7. If the agent scored 9+, there may not be much to improve — that's fine, focus on cleanup.
-8. Do NOT create a doc if the failure is too task-specific to generalize.
-
-After reading the context file, delete EVALBUFF_DOCS_CONTEXT.md when you're done.`
-
-  try {
-    const runner = new ClaudeRunner(repoPath, {}, model)
-    await runner.run(prompt)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.warn(`  [DocsWriter] Failed for ${task.featureId}: ${msg.slice(0, 200)}`)
+    sections.push(
+      `### ${task.featureId} (score: ${task.score.toFixed(1)}/10)\n` +
+      suggestions.map((s) => `- ${s}`).join('\n'),
+    )
   }
 
-  // Clean up context file if the agent didn't
-  if (fs.existsSync(contextPath)) {
-    fs.rmSync(contextPath)
-  }
+  return sections.join('\n\n')
 }
 
 // --- Docs refactor agent (Claude Code + Opus) ---
 
 async function runDocsRefactorAgent(
   repoPath: string,
-  docsDiffText: string,
+  judgeSuggestions: string,
   model: string,
 ): Promise<void> {
   console.log(`\n  [DocsRefactor] Running holistic docs refactor...`)
 
-  // Write the diff context
-  const diffPath = path.join(repoPath, 'EVALBUFF_DOCS_DIFF.md')
+  // Write the judge suggestions context
+  const contextPath = path.join(repoPath, 'EVALBUFF_JUDGE_SUGGESTIONS.md')
 
-  const diffContent = `# Recent Docs Changes
+  const contextContent = `# Judge Documentation Suggestions
 
-The following changes were made to the documentation in the previous step by per-task docs writers.
-Review these changes in context of ALL existing docs and improve the overall quality.
+Multiple judge agents reviewed coding agent attempts and identified documentation gaps.
+Below are their suggestions for what to change or add to help future agents perform better.
 
-${docsDiffText || '(No changes were made)'}
+${judgeSuggestions || '(No suggestions were made)'}
 `
 
-  fs.writeFileSync(diffPath, diffContent)
+  fs.writeFileSync(contextPath, contextContent)
 
-  const prompt = `Read the file EVALBUFF_DOCS_DIFF.md which shows recent documentation changes made by per-task doc writers.
+  const prompt = `Read the file EVALBUFF_JUDGE_SUGGESTIONS.md which contains documentation suggestions from judge agents who reviewed coding agent attempts.
 
-Your job: Look at ALL documentation (docs/, AGENTS.md, CLAUDE.md) holistically and improve it.
+Your job: Read ALL existing documentation (docs/, AGENTS.md, CLAUDE.md), consider the judge suggestions, and make the documentation as useful as possible for coding agents.
 
 What to do:
-1. **Merge overlapping docs** — if multiple docs cover similar topics, combine them into one clear doc.
-2. **Remove redundancy** — if the same advice appears in multiple places, consolidate it.
-3. **Make everything more concise** — dense, actionable information is better than verbose explanations. Cut fluff.
-4. **Fix contradictions** — if docs disagree, pick the correct advice and remove the wrong one.
-5. **Improve organization** — group related docs logically. Use clear file paths.
-6. **Prune stale docs** — remove docs that reference files/patterns that no longer exist in the codebase.
-7. **Polish the new additions** — the recent changes may be rough; clean them up and integrate them properly.
+1. **Implement judge suggestions** — the judges tested the code and know what the agents got wrong. Apply their suggestions by creating, updating, or restructuring docs as needed.
+2. **Edit existing docs** — when a suggestion says to update an existing doc, make fine-grained edits rather than rewriting from scratch.
+3. **Create new docs** — when a suggestion identifies a missing pattern or convention, create a concise new doc for it.
+4. **Merge overlapping docs** — if multiple suggestions or existing docs cover similar topics, combine them.
+5. **Remove redundancy** — consolidate duplicate advice. Dense, actionable information beats verbose explanations.
+6. **Fix contradictions** — if docs disagree, pick the correct advice and remove the wrong one.
+7. **Prune stale docs** — remove docs that reference files/patterns that no longer exist in the codebase.
 
 Rules:
 - ONLY modify files in docs/, AGENTS.md, or CLAUDE.md. Do NOT modify source code.
 - It's OK to delete doc files that are redundant or low-value.
 - The goal is a minimal, high-signal set of docs that a coding agent will actually use.
 - Less is more — 5 great docs are better than 15 mediocre ones.
+- Be specific and actionable — reference concrete file paths, patterns, and conventions.
 
-After you're done, delete EVALBUFF_DOCS_DIFF.md.`
+After you're done, delete EVALBUFF_JUDGE_SUGGESTIONS.md.`
 
   try {
     const runner = new ClaudeRunner(repoPath, {}, model)
@@ -499,8 +442,8 @@ After you're done, delete EVALBUFF_DOCS_DIFF.md.`
   }
 
   // Clean up
-  if (fs.existsSync(diffPath)) {
-    fs.rmSync(diffPath)
+  if (fs.existsSync(contextPath)) {
+    fs.rmSync(contextPath)
   }
 }
 
@@ -655,38 +598,19 @@ async function runOvernight(opts: OvernightOptions): Promise<void> {
     console.log(`IMPROVEMENT LOOP ${loop}/${opts.loops}`)
     console.log(`${'*'.repeat(60)}`)
 
-    // 4a: Sequential docs writing per task
-    console.log(`\n--- Step 4a: Docs writer agents (${previousResults.tasks.length} tasks) ---`)
+    // 4a: Collect judge suggestions and run docs refactor agent
+    const validTasks = previousResults.tasks.filter((t) => t.score >= 0)
+    const judgeSuggestions = collectDocSuggestions(validTasks)
+
+    console.log(`\n--- Step 4a: Docs refactor with judge suggestions ---`)
     const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
 
-    for (const task of previousResults.tasks) {
-      if (task.score < 0) {
-        console.log(`  Skipping ${task.featureId} (agent failed)`)
-        continue
-      }
-      await runDocsWriterAgent(opts.repoPath, task, opts.docsModel)
-    }
+    // Save judge suggestions for logging
+    fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${loop}.txt`), judgeSuggestions)
 
-    // Commit docs changes from writers
-    try {
-      execSync('git add docs/ AGENTS.md CLAUDE.md 2>/dev/null', { cwd: opts.repoPath, stdio: 'ignore' })
-      execSync(`git commit -m "evalbuff: docs writer changes (loop ${loop})" --allow-empty`, {
-        cwd: opts.repoPath,
-        stdio: 'ignore',
-      })
-    } catch { /* fine */ }
+    await runDocsRefactorAgent(opts.repoPath, judgeSuggestions, opts.docsModel)
 
-    // 4b: Holistic docs refactor
-    console.log(`\n--- Step 4b: Holistic docs refactor ---`)
-    const docsSnapshotAfterWriters = getDocsSnapshot(opts.repoPath)
-    const docsDiffText = computeDocsDiffText(docsSnapshotBefore, docsSnapshotAfterWriters)
-
-    // Save docs diff
-    fs.writeFileSync(path.join(logDir, `docs-diff-loop-${loop}.txt`), docsDiffText)
-
-    await runDocsRefactorAgent(opts.repoPath, docsDiffText, opts.docsModel)
-
-    // Commit refactor changes
+    // Commit docs changes
     try {
       execSync('git add docs/ AGENTS.md CLAUDE.md 2>/dev/null', { cwd: opts.repoPath, stdio: 'ignore' })
       execSync(`git commit -m "evalbuff: docs refactor (loop ${loop})" --allow-empty`, {
@@ -695,15 +619,17 @@ async function runOvernight(opts: OvernightOptions): Promise<void> {
       })
     } catch { /* fine */ }
 
-    // Save final docs state for this loop
+    // Save docs state and diff for this loop
     const docsAfterRefactor = getDocsSnapshot(opts.repoPath)
+    const docsDiffText = computeDocsDiffText(docsSnapshotBefore, docsAfterRefactor)
+    fs.writeFileSync(path.join(logDir, `docs-diff-loop-${loop}.txt`), docsDiffText)
     fs.writeFileSync(
       path.join(logDir, `docs-state-loop-${loop}.json`),
       JSON.stringify(docsAfterRefactor, null, 2),
     )
 
-    // 4c: Re-eval with updated docs
-    console.log(`\n--- Step 4c: Re-evaluation with updated docs ---`)
+    // 4b: Re-eval with updated docs
+    console.log(`\n--- Step 4b: Re-evaluation with updated docs ---`)
     const results = await runEvalRound(features, groundTruthDiffs, opts, loop)
     saveRoundResults(logDir, results)
 
