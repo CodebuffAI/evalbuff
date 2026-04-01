@@ -40,8 +40,8 @@ src/
 
 - Runtime: Bun (not Node). Entry points use `import.meta.main` for CLI guards.
 - This repo commits only `bun.lock` (no `package-lock.json`). Dependency changes must regenerate `bun.lock`. Verify with `bun install --frozen-lockfile`, `bun run typecheck`, and `bun test`.
-- Validation: Zod v4 (import from `zod/v4`).
-- Agents: Codex (GPT-5.4) for planning, carving, and judging. Claude Code for rebuilding features and refactoring docs.
+- Validation: All schema validation uses **Zod v4** imported from `zod/v4`. Never import from `zod` directly (Zod v3). This applies to all files across the project.
+- Agents: Codex (GPT-5.4) for planning, carving, and judging. Claude Code for rebuilding features and refactoring docs. The docs refactor agent uses `docsModel`, not `codingModel`.
 
 ### Docs-Code Consistency
 
@@ -82,6 +82,15 @@ Before finishing any task, run this checklist:
 User-facing CLI entrypoints (`src/run-evalbuff.ts`, `src/carve-features.ts`) follow these rules:
 
 - Implement the exact flag spellings specified in the task or README. The stable flags for the main CLI are `--repo`, `--n`, `--parallelism`, `--loops`, `--init-command`, `--coding-model`, `--docs-model`.
-- Validate required and numeric arguments. Smoke-test with at least one invocation.
-- A CLI change is incomplete without: the runnable file in `src/`, the `package.json` script (if applicable), and matching README usage.
+- Validate arguments before any orchestration side effects, in this order: (1) `--repo` path exists, (2) `git rev-parse --show-toplevel` succeeds in that path, (3) numeric flags parse as valid integers. A bad repo must fail with a local validation error — it must not start Codex/Claude, create `evalbuff-run-*` directories, or write repo artifacts.
+- A CLI change is incomplete without: the runnable file in `src/`, the `package.json` script (if applicable), and matching README usage with exact flag spellings and defaults.
 - Expose a reusable library function plus a thin CLI wrapper. The CLI parses argv, calls the function, prints progress, and sets exit codes. This keeps orchestration importable by tests and other modules.
+
+### Two Distinct Orchestration Paths
+
+`runEvalbuff()` in `src/run-evalbuff.ts` and `carveFeatures()` in `src/carve-features.ts` are separate orchestration paths — do not mix them:
+
+- **`runEvalbuff()`** — the eval pipeline. Calls `planFeatures()` directly, selects candidates with `selectRandom()`, carves with `carveFeature()`, and keeps all run artifacts in `os.tmpdir()`.
+- **`carveFeatures()`** — the standalone carve CLI. Ranks candidates by complexity instead of random selection and writes `carve-<date>.json` into the target repo by default.
+
+The eval orchestrator should never call `carveFeatures()` from `src/carve-features.ts`.

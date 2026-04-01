@@ -115,20 +115,25 @@ Every runner must rewrite provider-native tool names into the canonical step nam
 | `Read` or `read_file` | File read (single path in `input.path` or `input.file_path`) |
 | `file_change` | File edit/write |
 
-### Codex Normalization Example
+### Codex Event → Canonical Mapping
 
-```ts
-case 'command_execution':
-  steps.push({ type: 'tool_call', toolName: 'shell', input: { command: item.command } })
-  break
-case 'file_change':
-  steps.push({ type: 'tool_call', toolName: 'file_change', input: { changes: item.changes } })
-  break
-```
+| Codex ThreadItem type | Canonical step(s) |
+|---|---|
+| `agent_message` | `{ type: 'text', text }` |
+| `command_execution` | `{ type: 'tool_call', toolName: 'shell' }` + optional `{ type: 'tool_result', toolName: 'shell' }` |
+| `file_change` | `{ type: 'tool_call', toolName: 'file_change' }` |
+| `mcp_tool_call` | `{ type: 'tool_call', toolName: 'mcp:<server>:<tool>' }` + optional `tool_result` |
+| `web_search` | `{ type: 'tool_call', toolName: 'web_search', input: { query } }` |
+| `reasoning` | skip (internal) |
+| `todo_list` | skip (internal) |
+
+**Note**: `web_search` must not be rewritten to `shell` — the shared trace format should preserve the provider action rather than synthesizing a fake command string.
 
 ### Codebuff Normalization
 
 Codebuff-native tools (`run_terminal_command`, `read_files`, `read_docs`, `read_subtree`, `str_replace`, `write_file`, `apply_patch`, `propose_str_replace`, `propose_write_file`) must be mapped to the canonical names. Internal housekeeping events like `set_messages` must be filtered out.
+
+**Input shape normalization**: For providers whose read tools emit arrays or provider-specific fields, normalization must rewrite both the tool name and the input shape into the shared format consumed by `extractDocsRead()` and other trace readers. For example, if a provider emits `input.paths: string[]` (an array of paths), the runner must either emit one canonical `tool_call` per path using `input.path` (e.g., `{ type: 'tool_call', toolName: 'Read', input: { path: 'docs/guide.md' } }`) or update `extractDocsRead()` in the same diff to understand the array form. A tool-name rename alone is incomplete.
 
 If a new tool name is introduced by a provider, update `extractDocsRead()` in `src/eval-helpers.ts` and any trace consumers.
 
@@ -144,14 +149,25 @@ steps.push({ type: 'tool_result', toolName: `mcp:${server}:${tool}`, output: ite
 
 This ensures trace consumers can reconstruct the full interaction.
 
+## Failure Semantics
+
+When a provider returns a completed session whose `output.type === 'error'` or throws during `run()`:
+
+- If the session produced steps, cost, or file edits, the runner must still capture `diff` with `captureGitDiff()`, compute `totalCostUsd`, and persist a structured debug dump (JSON containing `prompt`, `steps`, and serialized `error` fields)
+- After capturing partial work, the runner must **reject** (throw) so `runAgentOnCarve()` can convert it to a `score = -1` infrastructure failure result
+- Do not silently return a partial `RunnerResult` without indicating failure — the caller must know the run did not complete normally
+- In `src/eval-runner.ts`, `createInfrastructureFailureResult()` writes `score = -1`, `judging.overallScore = -1`, empty `diff`, and plain-text `trace` beginning with `Agent error:`. Tests that inspect `round-<n>/<featureId>/` must branch on score: for `score >= 0`, JSON-parse trace lines; for `score < 0`, assert non-empty plain text trace plus matching `-1` score fields
+
 ## Trace Persistence
 
 When `saveRoundResults()` writes a trace to disk, it calls `compressAndSave()` from `src/trace-compressor.ts` in the background. The compressor:
 
 - Supports both JSONL event streams and plain-text traces
-- Extracts large tool outputs above a size threshold into numbered sidecar files (`result-000.txt`, etc.)
-- Replaces inline content with stable pointers including size and content summaries
+- For JSONL traces: replaces only large event payload fields with stable sidecar pointers (includes file reference, byte count, and a short summary)
+- For plain-text traces: extracts only large embedded blocks (fenced code/output blocks, XML blocks, labelled content) while leaving the surrounding narrative inline — does not replace the entire trace with one marker
 - Writes `trace.txt.compressed` alongside the raw trace, with sidecars in `trace.txt.sidecars/`
+- Sidecar IDs are derived from SHA-256, so identical content always produces the same pointer
+- **Round-trip requirement**: compressed traces must be lossless — `restoreTrace(compressed, sidecarDir)` reproduces the original trace byte-for-byte for arbitrary text including quotes and JSON-like snippets
 
 ## Cost Estimation
 

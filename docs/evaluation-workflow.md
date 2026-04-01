@@ -71,17 +71,25 @@ const groundTruthDiff = feature.diff.trim() ? feature.diff : computeGroundTruthD
 
 Always prefer `feature.diff` — it captures shared-file cleanup edits that may not be recoverable from `originalFiles` alone. The reconstruction fallback exists only for legacy data.
 
-Wiring pattern in the orchestrator:
+`getGroundTruthDiff(feature)` returns the patch from the carved repo back to the original implementation: deleted feature files become additions with `--- /dev/null` and `+++ b/<path>`, and modified files use carved content as removed lines and original content as added lines. **Never pass the carve-removal diff to the judge** — pass the reconstruction diff.
+
+Wiring pattern in the orchestrator — every eval round must precompute ground truth diffs:
 
 ```ts
 const groundTruthDiffs = new Map(features.map(f => [f.id, getGroundTruthDiff(f)]))
-// ...
+// ... passed to runAgentOnCarve which forwards to judgeTaskResult
 judgeTaskResult({ taskPrompt, agentDiff, groundTruthDiff: groundTruthDiffs.get(feature.id) || '', repoDir })
 ```
 
 ## Judge Contract
 
-Judging is implemented in `src/judge.ts` as a dedicated module.
+Judging is implemented in `src/judge.ts` as a dedicated module. `buildReviewerPrompt()` is part of the public contract — changes to it affect the reliability of reviewer output.
+
+The reviewer prompt must:
+- Instruct the reviewer to read `docs/` and `AGENTS.md` when present
+- Run real verification commands from repo root (build, test, curl, etc.)
+- Write `evalbuff-review-result.json` as its final action
+- Produce `docSuggestions` strings that include the target doc path plus substantive content (function names, signatures, examples, gotchas)
 
 ### Schema
 
@@ -125,16 +133,17 @@ export async function judgeTaskResult(input: {
 `docSuggestions` flow through the pipeline as:
 
 1. Judge writes them per-task in `JudgingResult`
-2. `collectDocSuggestions()` aggregates with feature context: `### feature-id (score: 4.0/10)` + bullets
-3. `runDocsRefactorAgent()` receives the aggregated text and edits docs holistically
+2. `collectDocSuggestions(tasks)` aggregates `docSuggestions` (not `weaknesses`) from judge results, ignoring failed tasks. Format: `### feature-id (score: 4.0/10)` + bullet suggestions
+3. `runDocsRefactorAgent(repoPath, judgeSuggestions, model)` receives the aggregated text and edits docs holistically using `docsModel`
 
 ## Init Commands
 
 `runAgentOnCarve()` runs `execSync(initCommand, { cwd: repoDir, stdio: 'ignore', timeout: 120000 })` after cloning and checking out HEAD.
 
 - Scripts must be committed in the repo and invokable relative to repo root
-- The init command runs in the cloned checkout, not the source repo
-- In worktree-based flows, `git remote get-url origin` may not be a local path; use `git worktree list | head -1 | awk '{print $1}'` for discovery
+- The init command runs in a fresh `git clone --no-checkout` checkout, **not** inside the original source repo or a sibling `git worktree add` checkout
+- `git worktree list` inside that clone only sees the clone itself — bootstrap helpers cannot discover the source worktree or its untracked files (e.g. `.env.local`) that way
+- Bootstrap helpers must rely on files present in the cloned checkout, explicit command arguments, or environment variables passed into the process — not implicit source worktree discovery
 - Example: `--init-command "bash setup.sh"`
 
 ## Docs Refactor Loop
@@ -155,8 +164,8 @@ Both the planner/carver (`evalbuff-carve-result.json`) and judge (`evalbuff-revi
 
 1. Agent is instructed to write a JSON file at a known path in `repoDir`
 2. After the run, attempt to read and parse the file
-3. Cleanup (`fs.rmSync`) in a `finally` block — never let cleanup failure override a successful parse
-4. If the file is missing or invalid, fall back to parsing JSON from the agent's response text
+3. Store the parsed value in a local variable, then **always** delete the file in a `finally` block with `fs.rmSync(resultPath, { force: true })`
+4. Only then `return parsed` or fall back to response text
 5. When parsing prose that may wrap JSON, extract the JSON object (e.g., regex for `{...}` containing expected keys), don't slice to the last `}`
 
 **Critical**: file parsing and cleanup must be separated so cleanup failure never discards a successfully parsed result:
@@ -178,12 +187,16 @@ if (fs.existsSync(resultPath)) {
 
 Do not use `unlinkSync()` inside the parse `try` — an unlink error can incorrectly turn a valid file into a failed run.
 
+**Repeated-run gotcha**: `planFeatures(repoPath)` may be called multiple times against the same repository during tests or orchestration. Leaving `evalbuff-carve-result.json` behind causes later runs to return stale plans and defeats the fallback path. Always clean up result files regardless of success or failure.
+
 ## Run Report Contract
 
-Every eval run writes `${logDir}/summary.json` and `${logDir}/report.md`.
+`src/report.ts` exports:
+- `saveRoundResults(logDir: string, roundResult: RoundResult): void` — writes per-task artifacts
+- `saveSummary(logDir: string, summary: EvalSummary, roundResults: RoundResult[], opts: EvalOptions): void` — writes both `${logDir}/summary.json` and `${logDir}/report.md`
 
 Report sections in order:
-1. `## Overview` — config table
+1. `## Overview` — config table (includes `Improvement loops`, `Coding model`, `Docs model`)
 2. `## Score Trajectory` — bar chart
 3. `## Scores by Round` — features × rounds table (shows `FAIL` for `score < 0`)
 4. `## <Round> — Detail` — per-task breakdown with score table, analysis, strengths/weaknesses, E2E tests, docs read, doc suggestions

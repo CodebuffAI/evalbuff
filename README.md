@@ -21,7 +21,9 @@ bun run src/run-evalbuff.ts \
   [--n 5] \
   [--parallelism 3] \
   [--loops 3] \
-  [--init-command "npm install"]
+  [--init-command "npm install"] \
+  [--coding-model sonnet] \
+  [--docs-model opus]
 ```
 
 ## Architecture

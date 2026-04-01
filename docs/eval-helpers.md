@@ -15,18 +15,21 @@ Calls `syncDocsIntoRepo()` internally, then:
 - Commits with message `evalbuff: pre-load docs` (only when `changedPaths.length > 0`)
 - Leaves the target repo clean after the helper runs
 
-Do not use `fs.cpSync()` as an overlay — it preserves deleted files in the target.
+**Warning**: `runAgentOnCarve()` must call `copyDocsIntoRepo(docsSourcePath, repoDir)` — not inline docs syncing with `fs.cpSync` or any other overlay copy. `docsSourcePath` is the working-tree repo that owns the latest docs and may differ from the repo used for `git clone`.
+
+**Why overlay copies fail**: An `fs.cpSync`-style overlay keeps files in the target that were deleted in the source. If the source has `docs/guide.md` and `AGENTS.md` but the target also has stale `docs/old.md` and `CLAUDE.md`, the stale files survive and mislead the coding agent. `syncDocsIntoRepo()` removes them. Postcondition: target contains exactly the source docs set, commit message is `evalbuff: pre-load docs`, and `git status --short` is empty.
 
 ## `syncDocsIntoRepo(sourceRepoPath, targetRepoPath): string[]`
 
-Snapshot mirroring, not overlay copying. Returns sorted list of changed relative paths.
+Pure filesystem mirror — no git side effects. Returns sorted list of changed relative paths.
 
 Rules:
 - Source of truth is exactly `docs/**/*.md`, `AGENTS.md`, `CLAUDE.md`
 - Copies added and modified files from source to target
 - Removes target files that are missing from the source snapshot
 - Removes now-empty subdirectories under `docs/`
-- Does NOT commit — caller decides whether to commit
+- Does NOT call `git add` or `git commit` — caller decides whether to commit
+- Does NOT stage or commit unrelated repo changes
 
 Used in two places:
 - Before coding-agent evals, to preload the latest working-tree docs into cloned repos (via `copyDocsIntoRepo`)
@@ -60,12 +63,13 @@ Use this instead of `computeGroundTruthDiff()` directly.
 
 ## `captureGitDiff(repoPath, { baseRef, pathspecs }): string`
 
-Captures a repo diff safely without staging files.
+Captures a repo diff safely. **Must be side-effect free** — `git status --short` must be unchanged before and after the call.
 
 - Diffs against an explicit base SHA (default: `HEAD`)
 - Includes committed changes since `baseRef`, staged, unstaged, and untracked files
 - Can be restricted to a pathspec subset
-- Never calls `git add .`
+- Never calls `git add`, including `git add -N`
+- Never modifies the staging area
 
 This helper exists because agents may create commits during a run; diffing against `HEAD` after the fact misses the real change.
 
@@ -107,8 +111,8 @@ withTestRepo({
 
 - When `localRepoPath` is provided: `git clone --no-checkout` against local checkout (near-instant via hardlinks)
 - Otherwise: `git clone --depth 1 <repoUrl>`, `git fetch --depth 1 origin <sha>`, `git checkout <sha>`
-- Runs `initCommand` inside the cloned repo with `env` merged onto `process.env`
-- Temp directory is always deleted in `finally`
+- `initCommand` is best-effort setup, not a hard failure. Runs `execSync(initCommand, { cwd: repoDir, stdio: 'ignore', env: { ...process.env, ...env } })` inside a `try/catch`. On failure, logs `Error running init command: <message>` via `getErrorObject(error).message` and still invokes the callback.
+- Temp directory cleanup in `finally` is wrapped so `fs.rmSync(..., { recursive: true, force: true })` only warns on failure and never overrides the callback result.
 
 ### `withTestRepoAndParent<T>(repoConfig, fn): Promise<T | null>`
 
@@ -120,7 +124,13 @@ withTestRepoAndParent({
 }, async (cwd, commitSha, parentSha) => { ... })
 ```
 
-- Resolves exactly one parent via `git log --pretty=%P -n 1 <commit>`
-- Returns `null` for root commits or merge commits (logs a warning)
-- Checks out the parent before invoking the callback
-- Temp directory always cleaned up in `finally`
+Exact commit-level evaluation sequence:
+1. `git clone --depth 1 <repoUrl> <repoDir>`
+2. `git fetch --depth 2 origin <commitSha>`
+3. `git checkout <commitSha>` (the repo briefly checks out the target commit)
+4. Resolve parents with `git log --pretty=%P -n 1 <commitSha>` — returns `null` for zero or multiple parents
+5. `git checkout <parentSha>` before invoking `fn(cwd, commitSha, parentSha)`
+
+**Note**: Do not substitute `FETCH_HEAD` or a custom `git init` bootstrap — the task prompt and tests assume the repo checks out the target commit before rewinding to the parent.
+
+Both helpers are required public exports in `src/test-repo-utils.ts`.
