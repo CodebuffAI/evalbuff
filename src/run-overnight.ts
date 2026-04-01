@@ -31,7 +31,7 @@ import type { RunnerResult, AgentStep } from './runners/runner'
 
 // --- Types ---
 
-interface OvernightOptions {
+export interface OvernightOptions {
   repoPath: string
   n: number            // number of features to randomly select
   parallelism: number  // parallel agent runs per eval round
@@ -696,7 +696,7 @@ function formatDuration(start: string, end: string): string {
 
 // --- Main orchestrator ---
 
-async function runOvernight(opts: OvernightOptions): Promise<void> {
+export async function runOvernight(opts: OvernightOptions): Promise<void> {
   const startTime = new Date().toISOString()
   const logDir = path.join(opts.repoPath, `evalbuff-overnight-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
   fs.mkdirSync(logDir, { recursive: true })
