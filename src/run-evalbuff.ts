@@ -12,14 +12,13 @@
  * Usage:
  *   bun run src/run-evalbuff.ts --repo /path/to/repo [--n 5] [--parallelism 10] [--loops 3] [--init-command "npm install"]
  */
-import { execSync } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 
 import { planFeatures, carveFeature } from './carve-features'
 import { collectDocSuggestions, runDocsRefactorAgent } from './docs-refactor'
-import { selectRandom, computeGroundTruthDiff, getDocsSnapshot, computeDocsDiffText } from './eval-helpers'
+import { selectRandom, getGroundTruthDiff, getDocsSnapshot, computeDocsDiffText } from './eval-helpers'
 import { runAgentOnCarve } from './eval-runner'
 import { saveRoundResults, saveSummary } from './report'
 
@@ -59,17 +58,40 @@ async function runEvalRound(
   async function worker(): Promise<void> {
     while (next < queue.length) {
       const { feature, i } = queue[next++]
-      const result = await runAgentOnCarve({
-        idx: i,
-        total: features.length,
-        repoPath: opts.repoPath,
-        feature,
-        initCommand: opts.initCommand,
-        model: opts.codingModel,
-        groundTruthDiff: groundTruthDiffs.get(feature.id) || '',
-        docsSourcePath: opts.repoPath,
-      })
-      results[i] = result
+      try {
+        const result = await runAgentOnCarve({
+          idx: i,
+          total: features.length,
+          repoPath: opts.repoPath,
+          feature,
+          initCommand: opts.initCommand,
+          model: opts.codingModel,
+          groundTruthDiff: groundTruthDiffs.get(feature.id) || '',
+          docsSourcePath: opts.repoPath,
+        })
+        results[i] = result
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        results[i] = {
+          featureId: feature.id,
+          prompt: feature.prompt,
+          score: -1,
+          diff: '',
+          trace: `Agent error: ${msg}`,
+          judging: {
+            analysis: `Agent failed: ${msg.slice(0, 500)}`,
+            strengths: [],
+            weaknesses: ['Agent failed due to infrastructure error'],
+            e2eTestsPerformed: [],
+            completionScore: -1,
+            codeQualityScore: -1,
+            e2eScore: -1,
+            overallScore: -1,
+          },
+          costEstimate: 0,
+          docsRead: [],
+        }
+      }
     }
   }
 
@@ -167,7 +189,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   // Pre-compute ground truth diffs
   const groundTruthDiffs = new Map<string, string>()
   for (const feature of features) {
-    groundTruthDiffs.set(feature.id, computeGroundTruthDiff(feature))
+    groundTruthDiffs.set(feature.id, getGroundTruthDiff(feature))
   }
 
   fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
@@ -200,15 +222,6 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${loop}.txt`), judgeSuggestions)
 
     await runDocsRefactorAgent(opts.repoPath, judgeSuggestions, opts.docsModel)
-
-    // Commit docs changes
-    try {
-      execSync('git add docs/ AGENTS.md CLAUDE.md 2>/dev/null', { cwd: opts.repoPath, stdio: 'ignore' })
-      execSync(`git commit -m "evalbuff: docs refactor (loop ${loop})" --allow-empty`, {
-        cwd: opts.repoPath,
-        stdio: 'ignore',
-      })
-    } catch { /* fine */ }
 
     // Save docs state and diff for this loop
     const docsAfterRefactor = getDocsSnapshot(opts.repoPath)

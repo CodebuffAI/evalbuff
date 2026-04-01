@@ -30,8 +30,8 @@ bun run src/run-evalbuff.ts \
 |------|------|
 | `run-evalbuff.ts` | Main orchestrator — carve features, run agents, judge, iterate on docs |
 | `eval-runner.ts` | Core agent execution — clone, carve, run agent, judge a single feature |
-| `eval-helpers.ts` | Pure utilities — carve ops, docs snapshots, ground truth diffs |
-| `docs-refactor.ts` | Docs refactor agent + judge suggestion collection |
+| `eval-helpers.ts` | Git/docs helpers — carve ops, docs sync, safe diff capture, ground truth selection |
+| `docs-refactor.ts` | Docs refactor agent + judge suggestion collection in an isolated temp clone |
 | `report.ts` | Logging and markdown report generation |
 | `carve-features.ts` | Feature carving — identifies and removes features from a codebase |
 | `judge.ts` | Codex-based reviewer agent that judges agent output with E2E testing |
@@ -39,3 +39,20 @@ bun run src/run-evalbuff.ts \
 | `test-repo-utils.ts` | Isolated git repo lifecycle management |
 | `runners/` | Agent runner implementations (Claude, Codex, Codebuff) |
 | `vendor/` | Shared utilities (error handling, print-mode types) |
+
+## Testing
+
+```bash
+bun run test
+bun run test:all
+bun run test:e2e
+bun run typecheck
+```
+
+## Artifacts
+
+Run artifacts are written under:
+
+```bash
+$TMPDIR/evalbuff-run-<timestamp>/
+```

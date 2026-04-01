@@ -1,6 +1,7 @@
 import { execSync } from 'child_process'
 
 import { Codex } from '@openai/codex-sdk'
+import { captureGitDiff } from '../eval-helpers'
 
 import type { Runner, RunnerResult, AgentStep } from './runner'
 import type { ThreadItem, Usage } from '@openai/codex-sdk'
@@ -16,6 +17,11 @@ export class CodexRunner implements Runner {
 
   async run(prompt: string): Promise<RunnerResult> {
     const steps: AgentStep[] = []
+    const baseSha = execSync('git rev-parse HEAD', {
+      cwd: this.cwd,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
 
     const codex = new Codex({
       apiKey: process.env.OPENAI_API_KEY || this.env.OPENAI_API_KEY,
@@ -54,12 +60,7 @@ export class CodexRunner implements Runner {
     // Get git diff after Codex has made changes
     let diff = ''
     try {
-      execSync('git add .', { cwd: this.cwd, stdio: 'ignore' })
-      diff = execSync('git diff HEAD', {
-        cwd: this.cwd,
-        encoding: 'utf-8',
-        maxBuffer: 10 * 1024 * 1024,
-      })
+      diff = captureGitDiff(this.cwd, { baseRef: baseSha })
     } catch {
       // Ignore git errors
     }

@@ -1,4 +1,4 @@
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
@@ -68,33 +68,69 @@ export function computeGroundTruthDiff(feature: CarvedFeature): string {
   return diffs.join('\n\n')
 }
 
+export function getGroundTruthDiff(feature: CarvedFeature): string {
+  if (feature.diff.trim()) return feature.diff
+  return computeGroundTruthDiff(feature)
+}
+
+export function ensureGitIdentity(repoPath: string): void {
+  try {
+    execFileSync('git', ['config', 'user.name', 'Evalbuff'], {
+      cwd: repoPath,
+      stdio: 'ignore',
+    })
+    execFileSync('git', ['config', 'user.email', 'evalbuff@example.invalid'], {
+      cwd: repoPath,
+      stdio: 'ignore',
+    })
+  } catch {
+    // best-effort only
+  }
+}
+
+export function captureGitDiff(
+  repoPath: string,
+  options: {
+    baseRef?: string
+    pathspecs?: string[]
+  } = {},
+): string {
+  const { baseRef = 'HEAD', pathspecs = [] } = options
+  const trackedArgs = ['diff', '--binary', baseRef]
+  if (pathspecs.length > 0) trackedArgs.push('--', ...pathspecs)
+
+  let trackedDiff = ''
+  try {
+    trackedDiff = execFileSync('git', trackedArgs, {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      maxBuffer: 10 * 1024 * 1024,
+    })
+  } catch {
+    trackedDiff = ''
+  }
+
+  const untrackedFiles = listUntrackedFiles(repoPath, pathspecs)
+  const untrackedDiffs = untrackedFiles
+    .map((filePath) => captureUntrackedFileDiff(repoPath, filePath))
+    .filter(Boolean)
+
+  return [trackedDiff.trimEnd(), ...untrackedDiffs.map((d) => d.trimEnd())]
+    .filter(Boolean)
+    .join('\n')
+}
+
 export function copyDocsIntoRepo(sourceRepoPath: string, targetRepoPath: string): void {
-  const sourceDocsDir = path.join(sourceRepoPath, 'docs')
-  const sourceAgentsMd = path.join(sourceRepoPath, 'AGENTS.md')
-  const sourceClaudeMd = path.join(sourceRepoPath, 'CLAUDE.md')
-  const targetDocsDir = path.join(targetRepoPath, 'docs')
+  const changedPaths = syncDocsIntoRepo(sourceRepoPath, targetRepoPath)
 
-  let copied = false
-  if (fs.existsSync(sourceDocsDir)) {
-    fs.cpSync(sourceDocsDir, targetDocsDir, { recursive: true })
-    copied = true
-  }
-  if (fs.existsSync(sourceAgentsMd)) {
-    fs.cpSync(sourceAgentsMd, path.join(targetRepoPath, 'AGENTS.md'))
-    copied = true
-  }
-  if (fs.existsSync(sourceClaudeMd)) {
-    fs.cpSync(sourceClaudeMd, path.join(targetRepoPath, 'CLAUDE.md'))
-    copied = true
-  }
-
-  if (copied) {
+  if (changedPaths.length > 0) {
+    ensureGitIdentity(targetRepoPath)
     try {
-      execSync(
-        'git add docs/ AGENTS.md CLAUDE.md 2>/dev/null; git add -u docs/ AGENTS.md CLAUDE.md 2>/dev/null',
-        { cwd: targetRepoPath, stdio: 'ignore' },
-      )
-      execSync('git commit -m "evalbuff: pre-load docs" --allow-empty', {
+      execFileSync('git', ['add', '-A', '--', ...changedPaths], {
+        cwd: targetRepoPath,
+        stdio: 'ignore',
+      })
+      execFileSync('git', ['commit', '-m', 'evalbuff: pre-load docs', '--allow-empty'], {
         cwd: targetRepoPath,
         stdio: 'ignore',
       })
@@ -102,6 +138,29 @@ export function copyDocsIntoRepo(sourceRepoPath: string, targetRepoPath: string)
       // fine
     }
   }
+}
+
+export function syncDocsIntoRepo(sourceRepoPath: string, targetRepoPath: string): string[] {
+  const sourceDocs = getDocsSnapshot(sourceRepoPath)
+  const targetDocs = getDocsSnapshot(targetRepoPath)
+  const changed = new Set<string>()
+
+  for (const filePath of Object.keys(targetDocs)) {
+    if (filePath in sourceDocs) continue
+    fs.rmSync(path.join(targetRepoPath, filePath), { force: true })
+    removeEmptyDocDirs(targetRepoPath, filePath)
+    changed.add(filePath)
+  }
+
+  for (const [filePath, content] of Object.entries(sourceDocs)) {
+    if (targetDocs[filePath] === content) continue
+    const absolutePath = path.join(targetRepoPath, filePath)
+    fs.mkdirSync(path.dirname(absolutePath), { recursive: true })
+    fs.writeFileSync(absolutePath, content)
+    changed.add(filePath)
+  }
+
+  return [...changed].sort()
 }
 
 export function getDocsSnapshot(repoPath: string): Record<string, string> {
@@ -163,4 +222,57 @@ export function computeDocsDiffText(before: Record<string, string>, after: Recor
   }
 
   return lines.join('\n')
+}
+
+function listUntrackedFiles(repoPath: string, pathspecs: string[]): string[] {
+  const args = ['ls-files', '--others', '--exclude-standard']
+  if (pathspecs.length > 0) args.push('--', ...pathspecs)
+
+  try {
+    const output = execFileSync('git', args, {
+      cwd: repoPath,
+      encoding: 'utf-8',
+    }).trim()
+    return output ? output.split('\n').filter(Boolean) : []
+  } catch {
+    return []
+  }
+}
+
+function captureUntrackedFileDiff(repoPath: string, filePath: string): string {
+  try {
+    return execFileSync('git', ['diff', '--binary', '--no-index', '--', '/dev/null', filePath], {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      maxBuffer: 10 * 1024 * 1024,
+    })
+  } catch (error) {
+    const output = error instanceof Error && 'stdout' in error
+      ? String((error as { stdout?: Buffer | string }).stdout || '')
+      : ''
+    return output
+  }
+}
+
+function removeEmptyDocDirs(repoPath: string, filePath: string): void {
+  let currentDir = path.dirname(path.join(repoPath, filePath))
+  const docsRoot = path.join(repoPath, 'docs')
+
+  while (currentDir.startsWith(docsRoot) && currentDir !== docsRoot) {
+    try {
+      if (fs.readdirSync(currentDir).length > 0) break
+      fs.rmdirSync(currentDir)
+      currentDir = path.dirname(currentDir)
+    } catch {
+      break
+    }
+  }
+
+  try {
+    if (currentDir === docsRoot && fs.existsSync(docsRoot) && fs.readdirSync(docsRoot).length === 0) {
+      fs.rmdirSync(docsRoot)
+    }
+  } catch {
+    // ignore cleanup failures
+  }
 }

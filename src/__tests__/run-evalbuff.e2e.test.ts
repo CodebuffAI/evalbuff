@@ -298,6 +298,11 @@ describe('Evalbuff pipeline e2e', () => {
   it.skipIf(SKIP)(
     'runs the full evalbuff pipeline: plan → carve → eval → docs loop → re-eval',
     async () => {
+      const tmpDir = os.tmpdir()
+      const existingLogDirs = new Set(
+        fs.readdirSync(tmpDir).filter((entry) => entry.startsWith('evalbuff-run-')),
+      )
+
       // Use minimal settings: 2 features, 1 parallel run, 1 improvement loop
       await runEvalbuff({
         repoPath: repoDir,
@@ -308,12 +313,15 @@ describe('Evalbuff pipeline e2e', () => {
         docsModel: 'sonnet', // use sonnet for speed in tests
       })
 
-      // Find the log directory (evalbuff-overnight-*)
-      const entries = fs.readdirSync(repoDir)
-      const logDirName = entries.find((e) => e.startsWith('evalbuff-run-'))
+      // Find the new log directory in the temp dir.
+      const logDirName = fs
+        .readdirSync(tmpDir)
+        .filter((entry) => entry.startsWith('evalbuff-run-') && !existingLogDirs.has(entry))
+        .sort()
+        .at(-1)
       expect(logDirName).toBeDefined()
 
-      const logDir = path.join(repoDir, logDirName!)
+      const logDir = path.join(tmpDir, logDirName!)
       console.log(`Log directory: ${logDir}`)
 
       // --- Verify plan was saved ---

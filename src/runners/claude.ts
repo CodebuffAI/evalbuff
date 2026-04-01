@@ -1,6 +1,7 @@
 import { execSync } from 'child_process'
 
 import { query } from '@anthropic-ai/claude-agent-sdk'
+import { captureGitDiff } from '../eval-helpers'
 
 import type { Runner, RunnerResult, AgentStep } from './runner'
 
@@ -25,6 +26,11 @@ export class ClaudeRunner implements Runner {
   async run(prompt: string): Promise<RunnerResult> {
     const steps: AgentStep[] = []
     let totalCostUsd = 0
+    const baseSha = execSync('git rev-parse HEAD', {
+      cwd: this.cwd,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
 
     console.log(`[ClaudeRunner] Running with model ${this.model} in ${this.cwd}`)
 
@@ -72,12 +78,7 @@ export class ClaudeRunner implements Runner {
     // Get git diff after Claude has made changes
     let diff = ''
     try {
-      execSync('git add .', { cwd: this.cwd, stdio: 'ignore' })
-      diff = execSync('git diff HEAD', {
-        cwd: this.cwd,
-        encoding: 'utf-8',
-        maxBuffer: 10 * 1024 * 1024,
-      })
+      diff = captureGitDiff(this.cwd, { baseRef: baseSha })
     } catch {
       // Ignore git errors
     }

@@ -1,4 +1,10 @@
+import { execSync } from 'child_process'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+
 import { ClaudeRunner } from './runners/claude'
+import { syncDocsIntoRepo } from './eval-helpers'
 
 import type { TaskResult } from './eval-runner'
 
@@ -24,6 +30,8 @@ export async function runDocsRefactorAgent(
   model: string,
 ): Promise<void> {
   console.log(`\n  [DocsRefactor] Running holistic docs refactor...`)
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-docs-'))
+  const repoDir = path.join(tempDir, 'repo')
 
   const prompt = `Read ALL existing documentation (docs/, AGENTS.md, CLAUDE.md), consider the judge suggestions below, and make the documentation as useful as possible for coding agents.
 
@@ -58,10 +66,26 @@ Rules:
 - Be specific about file paths, directory structure, and conventions — but generic about what gets built.`
 
   try {
-    const runner = new ClaudeRunner(repoPath, {}, model, 'high')
+    execSync(`git clone --no-checkout "${repoPath}" "${repoDir}"`, { stdio: 'ignore' })
+    const headSha = execSync('git rev-parse HEAD', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+    }).trim()
+    execSync(`git checkout ${headSha}`, { cwd: repoDir, stdio: 'ignore' })
+
+    syncDocsIntoRepo(repoPath, repoDir)
+
+    const runner = new ClaudeRunner(repoDir, {}, model, 'high')
     await runner.run(prompt)
+    syncDocsIntoRepo(repoDir, repoPath)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.warn(`  [DocsRefactor] Failed: ${msg.slice(0, 200)}`)
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    } catch {
+      // ignore cleanup failures
+    }
   }
 }

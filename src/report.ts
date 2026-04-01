@@ -1,6 +1,8 @@
 import fs from 'fs'
 import path from 'path'
 
+import { compressAndSave } from './trace-compressor'
+
 import type { TaskResult } from './eval-runner'
 import type { JudgingResult } from './judge'
 
@@ -40,7 +42,16 @@ export function saveRoundResults(logDir: string, roundResult: RoundResult): void
     const taskDir = path.join(roundDir, task.featureId)
     fs.mkdirSync(taskDir, { recursive: true })
 
-    fs.writeFileSync(path.join(taskDir, 'trace.txt'), task.trace)
+    const tracePath = path.join(taskDir, 'trace.txt')
+    fs.writeFileSync(tracePath, task.trace)
+    // Compress the raw trace in the background (fire-and-forget) so large
+    // tool outputs don't bloat the log directory.  The compressed file is
+    // written alongside the raw trace as trace.txt.compressed and sidecars
+    // live in trace.txt.sidecars/.
+    compressAndSave(tracePath, task.trace).catch((err: unknown) => {
+      console.warn(`[report] Failed to compress trace for ${task.featureId}: ${err}`)
+    })
+
     fs.writeFileSync(path.join(taskDir, 'diff.txt'), task.diff)
     fs.writeFileSync(path.join(taskDir, 'judging.json'), JSON.stringify(task.judging, null, 2))
     fs.writeFileSync(path.join(taskDir, 'score.txt'), task.score.toString())
