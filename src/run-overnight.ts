@@ -398,24 +398,16 @@ async function runDocsRefactorAgent(
 ): Promise<void> {
   console.log(`\n  [DocsRefactor] Running holistic docs refactor...`)
 
-  // Write the judge suggestions context
-  const contextPath = path.join(repoPath, 'EVALBUFF_JUDGE_SUGGESTIONS.md')
+  const prompt = `Read ALL existing documentation (docs/, AGENTS.md, CLAUDE.md), consider the judge suggestions below, and make the documentation as useful as possible for coding agents.
 
-  const contextContent = `# Judge Documentation Suggestions
+## Judge Suggestions
 
-Multiple judge agents reviewed coding agent attempts and identified documentation gaps.
-Below are their suggestions for what to change or add to help future agents perform better.
+Multiple judge agents reviewed coding agent attempts and identified documentation gaps. Here are their suggestions:
 
 ${judgeSuggestions || '(No suggestions were made)'}
-`
 
-  fs.writeFileSync(contextPath, contextContent)
+## What to do
 
-  const prompt = `Read the file EVALBUFF_JUDGE_SUGGESTIONS.md which contains documentation suggestions from judge agents who reviewed coding agent attempts.
-
-Your job: Read ALL existing documentation (docs/, AGENTS.md, CLAUDE.md), consider the judge suggestions, and make the documentation as useful as possible for coding agents.
-
-What to do:
 1. **Implement judge suggestions** — the judges tested the code and know what the agents got wrong. Apply their suggestions by creating, updating, or restructuring docs as needed.
 2. **Edit existing docs** — when a suggestion says to update an existing doc, make fine-grained edits rather than rewriting from scratch.
 3. **Create new docs** — when a suggestion identifies a missing pattern or convention, create a concise new doc for it.
@@ -429,9 +421,7 @@ Rules:
 - It's OK to delete doc files that are redundant or low-value.
 - The goal is a minimal, high-signal set of docs that a coding agent will actually use.
 - Less is more — 5 great docs are better than 15 mediocre ones.
-- Be specific and actionable — reference concrete file paths, patterns, and conventions.
-
-After you're done, delete EVALBUFF_JUDGE_SUGGESTIONS.md.`
+- Be specific and actionable — reference concrete file paths, patterns, and conventions.`
 
   try {
     const runner = new ClaudeRunner(repoPath, {}, model)
@@ -439,11 +429,6 @@ After you're done, delete EVALBUFF_JUDGE_SUGGESTIONS.md.`
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.warn(`  [DocsRefactor] Failed: ${msg.slice(0, 200)}`)
-  }
-
-  // Clean up
-  if (fs.existsSync(contextPath)) {
-    fs.rmSync(contextPath)
   }
 }
 
