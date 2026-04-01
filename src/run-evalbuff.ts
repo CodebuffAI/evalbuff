@@ -14,6 +14,7 @@
  */
 import { execSync } from 'child_process'
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 
 import { planFeatures, carveFeature } from './carve-features'
@@ -97,7 +98,7 @@ async function runEvalRound(
 
 export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const startTime = new Date().toISOString()
-  const logDir = path.join(opts.repoPath, `evalbuff-run-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
+  const logDir = path.join(os.tmpdir(), `evalbuff-run-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
   fs.mkdirSync(logDir, { recursive: true })
 
   console.log(`\nEvalbuff Run`)
