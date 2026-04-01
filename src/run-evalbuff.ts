@@ -10,7 +10,7 @@
  *      b. Re-eval: rebuild in parallel, judge, get new scores + doc suggestions
  *
  * Usage:
- *   bun run src/run-evalbuff.ts --repo /path/to/repo [--n 5] [--parallelism 3] [--loops 3] [--init-command "npm install"]
+ *   bun run src/run-evalbuff.ts --repo /path/to/repo [--n 5] [--parallelism 10] [--loops 3] [--init-command "npm install"]
  */
 import { execSync } from 'child_process'
 import fs from 'fs'
@@ -50,9 +50,15 @@ async function runEvalRound(
   console.log(`ROUND ${round} — Evaluating ${features.length} features (parallelism=${opts.parallelism})`)
   console.log(`${'='.repeat(60)}`)
 
-  const results = await Promise.all(
-    features.map((feature, i) =>
-      runAgentOnCarve({
+  // Run features with bounded concurrency
+  const results: TaskResult[] = []
+  const queue = features.map((feature, i) => ({ feature, i }))
+  let next = 0
+
+  async function worker(): Promise<void> {
+    while (next < queue.length) {
+      const { feature, i } = queue[next++]
+      const result = await runAgentOnCarve({
         idx: i,
         total: features.length,
         repoPath: opts.repoPath,
@@ -61,8 +67,13 @@ async function runEvalRound(
         model: opts.codingModel,
         groundTruthDiff: groundTruthDiffs.get(feature.id) || '',
         docsSourcePath: opts.repoPath,
-      }),
-    ),
+      })
+      results[i] = result
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(opts.parallelism, features.length) }, () => worker()),
   )
 
   const valid = results.filter((r) => r.score >= 0)
@@ -116,16 +127,34 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   console.log(`Selected: ${selected.map((c) => c.id).join(', ')}`)
 
   const features: CarvedFeature[] = []
-  for (const candidate of selected) {
-    try {
-      const carved = await carveFeature(opts.repoPath, candidate)
-      if (carved) {
-        features.push(carved)
-        console.log(`  Carved: ${carved.id} — ${carved.operations.length} file operations`)
+  {
+    // Carve features in parallel with bounded concurrency
+    const carveQueue = [...selected]
+    let carveNext = 0
+    const carveResults: (CarvedFeature | null)[] = new Array(carveQueue.length).fill(null)
+
+    async function carveWorker(): Promise<void> {
+      while (carveNext < carveQueue.length) {
+        const idx = carveNext++
+        const candidate = carveQueue[idx]
+        try {
+          const carved = await carveFeature(opts.repoPath, candidate)
+          if (carved) {
+            carveResults[idx] = carved
+            console.log(`  Carved: ${carved.id} — ${carved.operations.length} file operations`)
+          }
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          console.error(`  Failed to carve ${candidate.id}: ${msg.slice(0, 200)}`)
+        }
       }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      console.error(`  Failed to carve ${candidate.id}: ${msg.slice(0, 200)}`)
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(opts.parallelism, carveQueue.length) }, () => carveWorker()),
+    )
+    for (const result of carveResults) {
+      if (result) features.push(result)
     }
   }
 
@@ -247,7 +276,7 @@ if (import.meta.main) {
 
   const repoPath = getArg('repo')
   const n = parseInt(getArg('n', '5'))
-  const parallelism = parseInt(getArg('parallelism', '3'))
+  const parallelism = parseInt(getArg('parallelism', '10'))
   const loops = parseInt(getArg('loops', '3'))
   const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
   const codingModel = getArg('coding-model', 'sonnet')
