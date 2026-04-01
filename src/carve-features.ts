@@ -1,31 +1,26 @@
 /**
  * Feature Carver for evalbuff v2.
  *
- * Instead of using git commits as evals, this:
- * 1. Analyzes a codebase to identify discrete, self-contained features
- * 2. Plans how to cleanly delete each feature
- * 3. Produces diffs that remove the feature (code, docs, references)
- *
- * The output can then be used as eval tasks: give agents a simple prompt
- * to rebuild the deleted feature, judge against the original code.
+ * Uses Codex agents to:
+ * 1. Analyze a codebase to identify discrete, self-contained features
+ * 2. Carve each feature out in an isolated git worktree, running typecheck/tests to verify
+ * 3. Capture the real git diff as the ground truth
  */
 import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
-import OpenAI from 'openai'
-
-import { applyPatch } from './apply-patch'
+import { Codex } from '@openai/codex-sdk'
 
 // --- Types ---
 
 export interface CarveCandidate {
   id: string
   name: string
-  prompt: string // Short, natural prompt to rebuild this feature
-  description: string // What this feature does
-  files: string[] // Files involved (to delete or modify)
-  relevantFiles: string[] // Other files worth reading for context (importers, related modules, etc.)
+  prompt: string
+  description: string
+  files: string[]
+  relevantFiles: string[]
   complexity: 'small' | 'medium' | 'large'
 }
 
@@ -36,11 +31,8 @@ export interface CarvePlan {
 
 export interface FileOperation {
   path: string
-  action: 'delete' | 'modify' | 'patch'
-  /** For 'modify': the new file content with the feature removed */
+  action: 'delete' | 'modify'
   newContent?: string
-  /** For 'patch': a unified diff to apply to the file */
-  diff?: string
 }
 
 export interface CarvedFeature {
@@ -52,7 +44,7 @@ export interface CarvedFeature {
   originalFiles: Record<string, string>
   /** Operations to perform to carve the feature out */
   operations: FileOperation[]
-  /** Unified diff of the carving (deletions) */
+  /** Unified diff of the carving (from git diff) */
   diff: string
 }
 
@@ -62,97 +54,48 @@ export interface CarveResult {
   features: CarvedFeature[]
 }
 
-// --- OpenAI client ---
+// --- Constants ---
 
-function getClient(): OpenAI {
-  return new OpenAI() // Uses OPENAI_API_KEY from env
-}
+const RESULT_FILE = 'evalbuff-carve-result.json'
 
-const PLANNING_MODEL = 'gpt-5.4'
-const CARVING_MODEL = 'gpt-5.4'
+// --- Phase 1: Identify features to carve (Codex agent) ---
 
-// --- Repo analysis helpers ---
+export async function planFeatures(repoPath: string): Promise<CarvePlan> {
+  const codex = new Codex({
+    apiKey: process.env.OPENAI_API_KEY,
+  })
 
-function getFileTree(repoPath: string, maxDepth: number = 4): string {
-  try {
-    // Use git ls-files to only get tracked files
-    const files = execSync('git ls-files', {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      maxBuffer: 10 * 1024 * 1024,
-    })
-      .trim()
-      .split('\n')
-      .filter(Boolean)
+  const thread = codex.startThread({
+    model: 'gpt-5.4',
+    workingDirectory: repoPath,
+    approvalPolicy: 'never',
+    sandboxMode: 'read-only',
+    webSearchMode: 'live',
+    modelReasoningEffort: 'high',
+  })
 
-    // Filter out noise
-    const filtered = files.filter((f) => {
-      const parts = f.split('/')
-      if (parts.length > maxDepth) return false
-      if (f.endsWith('.lock') || f.endsWith('.lockb')) return false
-      if (f.includes('node_modules/')) return false
-      if (f.endsWith('.json') && f.includes('package-lock')) return false
-      return true
-    })
+  console.log('Planning features to carve...')
 
-    return filtered.join('\n')
-  } catch {
-    return ''
-  }
-}
+  const prompt = `You are an expert software architect. Analyze this codebase to identify 15-25 discrete, self-contained features that can be cleanly "carved out" (deleted) and used as coding evaluation tasks.
 
-function readFile(repoPath: string, filePath: string): string | null {
-  try {
-    const fullPath = path.join(repoPath, filePath)
-    return fs.readFileSync(fullPath, 'utf-8')
-  } catch {
-    return null
-  }
-}
+Explore the codebase thoroughly — read the file tree, key config files, entry points, and source files to understand the architecture.
 
-function getRepoStats(repoPath: string): string {
-  const fileTree = getFileTree(repoPath)
-  const files = fileTree.split('\n').filter(Boolean)
+## What makes a GOOD carve candidate
 
-  const byExtension: Record<string, number> = {}
-  for (const f of files) {
-    const ext = path.extname(f) || '(no ext)'
-    byExtension[ext] = (byExtension[ext] || 0) + 1
-  }
-
-  const sorted = Object.entries(byExtension)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 15)
-    .map(([ext, count]) => `  ${ext}: ${count}`)
-    .join('\n')
-
-  return `Total tracked files: ${files.length}\nBy extension:\n${sorted}`
-}
-
-// --- Phase 1: Plan features to carve ---
-
-const PLANNING_SYSTEM = `You are an expert software architect analyzing a codebase to identify discrete, self-contained features that can be cleanly "carved out" (deleted) and used as coding evaluation tasks.
-
-## Your Goal
-
-Identify 15-25 features in this codebase that could be cleanly removed and then rebuilt by a coding agent. Each feature should:
-
-1. **Be self-contained** — removing it leaves the rest of the codebase functional (maybe some missing imports/references, but structurally intact)
-2. **Be describable in 1-2 sentences** — a developer could ask for it naturally
-3. **Be non-trivial but bounded** — not a one-liner, but not "rewrite the whole app"
-4. **Cover different aspects** — mix of UI components, API endpoints, utilities, config, tests, etc.
-5. **Not overlap** — deleting feature A shouldn't also delete most of feature B
-
-## What makes a good carve candidate
-
-- A React component + its usage sites
-- An API endpoint (route + handler + types)
+- A React component + its usage sites + unit tests + docs
+- An API endpoint (route + handler + types + unit tests + docs)
 - A CLI subcommand or flag
 - A utility module used in a few places
-- A feature behind a config/flag
+- A feature behind a config/flag including tests and docs
 - A test suite for a specific module
 - A middleware or plugin
 - An integration with an external service
+
+Each feature should:
+1. Be self-contained — removing it leaves the rest of the codebase functional
+2. Be describable in 1-2 sentences — a developer could ask for it naturally
+3. Be non-trivial but bounded — not a one-liner, but not "rewrite the whole app"
+4. Not overlap with other candidates
 
 ## What makes a BAD candidate
 
@@ -161,9 +104,11 @@ Identify 15-25 features in this codebase that could be cleanly removed and then 
 - Trivially small changes (rename, config tweak)
 - Auto-generated or boilerplate code
 
-## Output Format
+## Output
 
-Respond with valid JSON matching this schema:
+After your analysis, write a file called \`${RESULT_FILE}\` with this JSON structure:
+
+\`\`\`json
 {
   "reasoning": "Your analysis of the codebase and approach to selecting features",
   "candidates": [
@@ -173,226 +118,191 @@ Respond with valid JSON matching this schema:
       "prompt": "Natural prompt a developer would use to ask for this feature, 1-2 sentences",
       "description": "What this feature does and why it exists",
       "files": ["path/to/file1.ts", "path/to/file2.tsx"],
-      "relevantFiles": ["path/to/importer.ts", "path/to/related.ts"],
+      "relevantFiles": ["path/to/importer.ts"],
       "complexity": "small|medium|large"
     }
   ]
 }
+\`\`\`
 
-- **files**: The files that ARE the feature (to be deleted or modified to remove it).
-- **relevantFiles**: Other files worth reading for context — files that import or reference the feature, related modules, config files, etc. These help understand how the feature is wired in.
+- **files**: The files that ARE the feature (to be deleted or modified to remove it). Be thorough — missing a file means the carve won't be clean.
+- **relevantFiles**: Other files that import or reference the feature.
 
-Be thorough in listing ALL files involved in each feature — missing a file means the carve won't be clean.`
+You MUST write the result file as your last action.`
 
-export async function planFeatures(repoPath: string): Promise<CarvePlan> {
-  const client = getClient()
+  const result = await thread.run(prompt)
 
-  const fileTree = getFileTree(repoPath)
-  const stats = getRepoStats(repoPath)
-
-  // Read key files for context
-  const keyFiles = [
-    'package.json',
-    'README.md',
-    'CLAUDE.md',
-    'tsconfig.json',
-    'src/index.ts',
-    'src/index.tsx',
-    'src/app.ts',
-    'src/app.tsx',
-    'src/main.ts',
-    'src/main.tsx',
-  ]
-
-  let keyFileContents = ''
-  for (const kf of keyFiles) {
-    const content = readFile(repoPath, kf)
-    if (content) {
-      keyFileContents += `\n### ${kf}\n\`\`\`\n${content.slice(0, 5000)}\n\`\`\`\n`
+  // Read the result file
+  const resultPath = path.join(repoPath, RESULT_FILE)
+  if (!fs.existsSync(resultPath)) {
+    // Try to extract from the agent's final response
+    const jsonMatch = result.finalResponse.match(/\{[\s\S]*"candidates"[\s\S]*\}/)
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]) as CarvePlan
+      console.log(`Identified ${parsed.candidates.length} carve candidates (from response)`)
+      return parsed
     }
+    throw new Error('Codex agent did not produce a result file')
   }
 
-  const userPrompt = `## Repository Stats
-${stats}
-
-## File Tree
-\`\`\`
-${fileTree}
-\`\`\`
-
-## Key Files
-${keyFileContents || '(none found)'}
-
-Please analyze this codebase and identify 15-25 features that can be cleanly carved out for evaluation.`
-
-  console.log('Planning features to carve...')
-  const response = await client.chat.completions.create({
-    model: PLANNING_MODEL,
-    messages: [
-      { role: 'system', content: PLANNING_SYSTEM },
-      { role: 'user', content: userPrompt },
-    ],
-    response_format: { type: 'json_object' },
-  })
-
-  const text = response.choices[0]?.message?.content
-  if (!text) throw new Error('No response from planning model')
-
-  const parsed = JSON.parse(text) as CarvePlan
-  console.log(`Identified ${parsed.candidates.length} carve candidates`)
-  return parsed
+  try {
+    const raw = fs.readFileSync(resultPath, 'utf-8')
+    const parsed = JSON.parse(raw) as CarvePlan
+    console.log(`Identified ${parsed.candidates.length} carve candidates`)
+    return parsed
+  } finally {
+    fs.rmSync(resultPath, { force: true })
+  }
 }
 
-// --- Phase 2: Execute carving for each feature ---
-
-const CARVING_SYSTEM = `You are a precise code surgeon. Your job is to cleanly remove a specific feature from a codebase.
-
-## Rules
-
-1. **Delete completely** — remove ALL code related to the feature: components, handlers, types, tests, docs, imports, route registrations, etc.
-2. **Don't break the rest** — the remaining code should still be structurally valid. Fix imports, remove dead references, etc.
-3. **Minimal collateral** — only remove what's necessary. Don't "improve" or refactor surrounding code.
-4. **Be thorough** — check for references in other files. If file A imports something from the feature, update file A's imports.
-
-## Output Format
-
-Respond with valid JSON matching this schema:
-{
-  "operations": [
-    {
-      "path": "path/to/file.ts",
-      "action": "delete"
-    },
-    {
-      "path": "path/to/other-file.ts",
-      "action": "modify",
-      "newContent": "...full file content with feature removed..."
-    },
-    {
-      "path": "path/to/another-file.ts",
-      "action": "patch",
-      "diff": "...unified diff..."
-    }
-  ]
-}
-
-Three action types:
-- **"delete"** — remove the entire file.
-- **"modify"** — provide the COMPLETE new file content. Best for small files or when most of the file changes.
-- **"patch"** — provide a unified diff to apply. Best for large files where only a small portion changes. Use standard unified diff format with context lines (space prefix), deletions (- prefix), and additions (+ prefix), with @@ hunk headers.
-
-Only include files that actually need to change. Don't include files that are unaffected.`
+// --- Phase 2: Carve a feature in an isolated worktree ---
 
 export async function carveFeature(
   repoPath: string,
   candidate: CarveCandidate,
 ): Promise<CarvedFeature | null> {
-  const client = getClient()
+  console.log(`  Carving feature: ${candidate.id}...`)
 
-  const allPaths = [...new Set([...candidate.files, ...(candidate.relevantFiles || [])])]
+  // Save original files before carving
+  const originalFiles: Record<string, string> = {}
+  for (const filePath of candidate.files) {
+    const fullPath = path.join(repoPath, filePath)
+    if (fs.existsSync(fullPath)) {
+      originalFiles[filePath] = fs.readFileSync(fullPath, 'utf-8')
+    }
+  }
 
-  const userPrompt = `## Feature to Remove
+  // Create a git worktree for isolated carving
+  const worktreePath = `${repoPath}-carve-${candidate.id}`
+  const branchName = `evalbuff-carve-${candidate.id}-${Date.now()}`
+
+  try {
+    execSync(`git worktree add -b "${branchName}" "${worktreePath}" HEAD`, {
+      cwd: repoPath,
+      stdio: 'ignore',
+    })
+
+    // Run the Codex agent in the worktree to carve the feature
+    const codex = new Codex({
+      apiKey: process.env.OPENAI_API_KEY,
+    })
+
+    const thread = codex.startThread({
+      model: 'gpt-5.4',
+      workingDirectory: worktreePath,
+      approvalPolicy: 'never',
+      sandboxMode: 'workspace-write',
+      webSearchMode: 'live',
+      modelReasoningEffort: 'high',
+    })
+
+    const prompt = `You are a precise code surgeon. Your job is to cleanly remove the following feature from this codebase.
+
+## Feature to Remove
 **Name:** ${candidate.name}
 **Description:** ${candidate.description}
 
 **Feature files (to delete or modify):** ${candidate.files.join(', ')}
-**Other relevant files to check:** ${candidate.relevantFiles?.join(', ') || '(none)'}
+**Other relevant files to check for references:** ${candidate.relevantFiles?.join(', ') || '(none)'}
 
-Read the files listed above. Also look for any other files that import or reference the feature — the lists above may not be exhaustive. Then remove this feature completely.
+## Rules
 
-For files that are entirely part of the feature, use "delete". For files that contain the feature mixed with other code, use "modify" and provide the full updated content.`
+1. **Delete completely** — remove ALL code related to the feature: components, handlers, types, tests, docs, imports, route registrations, etc.
+2. **Don't break the rest** — the remaining code must still compile and pass tests. Fix imports, remove dead references, etc.
+3. **Minimal collateral** — only remove what's necessary. Don't "improve" or refactor surrounding code.
+4. **Be thorough** — search for references in other files. If file A imports something from the feature, update file A's imports.
+5. **Verify your work** — after making changes, run the typecheck command (check package.json for the right command, typically \`tsc --noEmit\` or \`npx tsc --noEmit\`). Fix any errors that result from your changes. Also run the test suite if one exists.
 
-  console.log(`  Carving feature: ${candidate.id} (${allPaths.length} relevant paths)...`)
-  const response = await client.chat.completions.create({
-    model: CARVING_MODEL,
-    messages: [
-      { role: 'system', content: CARVING_SYSTEM },
-      { role: 'user', content: userPrompt },
-    ],
-    response_format: { type: 'json_object' },
-  })
+## Process
 
-  const text = response.choices[0]?.message?.content
-  if (!text) {
-    console.warn(`  No response for feature ${candidate.id}`)
-    return null
-  }
+1. Read the feature files and understand what to remove
+2. Search for all references/imports of the feature across the codebase
+3. Delete feature-only files, edit shared files to remove feature code
+4. Run typecheck and fix any compilation errors
+5. Run tests if available and fix any failures caused by the removal (remove tests for the deleted feature, fix tests that referenced it)
 
-  const parsed = JSON.parse(text) as { operations: FileOperation[] }
+Do NOT create any result files — just make the edits directly.`
 
-  // Compute diff
-  const diff = computeDiff(repoPath, parsed.operations)
+    await thread.run(prompt)
 
-  // Save original files (only the feature files, for judging)
-  const originalFiles: Record<string, string> = {}
-  for (const filePath of candidate.files) {
-    const content = readFile(repoPath, filePath)
-    if (content) {
-      originalFiles[filePath] = content
+    // Capture the diff
+    execSync('git add -A', { cwd: worktreePath, stdio: 'ignore' })
+    const diff = execSync('git diff --cached HEAD', {
+      cwd: worktreePath,
+      encoding: 'utf-8',
+      maxBuffer: 10 * 1024 * 1024,
+    })
+
+    if (!diff.trim()) {
+      console.warn(`  No changes made for ${candidate.id}`)
+      return null
     }
-  }
 
-  return {
-    id: candidate.id,
-    prompt: candidate.prompt,
-    description: candidate.description,
-    complexity: candidate.complexity,
-    originalFiles,
-    operations: parsed.operations,
-    diff,
+    // Build operations from the actual git diff
+    const operations = buildOperationsFromDiff(worktreePath, repoPath, candidate.files)
+
+    console.log(`  Carved ${candidate.id}: ${operations.length} file operations, ${diff.split('\n').length} diff lines`)
+
+    return {
+      id: candidate.id,
+      prompt: candidate.prompt,
+      description: candidate.description,
+      complexity: candidate.complexity,
+      originalFiles,
+      operations,
+      diff,
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.error(`  Failed to carve ${candidate.id}: ${msg.slice(0, 200)}`)
+    return null
+  } finally {
+    // Clean up worktree and branch
+    try {
+      execSync(`git worktree remove --force "${worktreePath}"`, {
+        cwd: repoPath,
+        stdio: 'ignore',
+      })
+    } catch { /* ignore */ }
+    try {
+      execSync(`git branch -D "${branchName}"`, {
+        cwd: repoPath,
+        stdio: 'ignore',
+      })
+    } catch { /* ignore */ }
   }
 }
 
-// --- Helpers ---
-
 /**
- * Compute a unified diff from file operations.
- * Creates a temp worktree, applies operations, and diffs.
+ * Build FileOperation[] by comparing worktree state against the original repo.
  */
-function computeDiff(
+function buildOperationsFromDiff(
+  worktreePath: string,
   repoPath: string,
-  operations: FileOperation[],
-): string {
-  const diffs: string[] = []
+  featureFiles: string[],
+): FileOperation[] {
+  const operations: FileOperation[] = []
 
-  for (const op of operations) {
-    const fullPath = path.join(repoPath, op.path)
-    const originalContent = fs.existsSync(fullPath)
-      ? fs.readFileSync(fullPath, 'utf-8')
-      : ''
+  // Get list of changed files from git
+  const statusOutput = execSync('git diff --cached --name-status HEAD', {
+    cwd: worktreePath,
+    encoding: 'utf-8',
+  })
 
-    if (op.action === 'delete') {
-      // Show the full file as deleted
-      const lines = originalContent.split('\n')
-      const header = `--- a/${op.path}\n+++ /dev/null`
-      const hunk = `@@ -1,${lines.length} +0,0 @@\n` +
-        lines.map((l) => `-${l}`).join('\n')
-      diffs.push(`${header}\n${hunk}`)
-    } else if (op.action === 'modify' && op.newContent !== undefined) {
-      // Compute line-level diff
-      const oldLines = originalContent.split('\n')
-      const newLines = op.newContent.split('\n')
-      // Use a simple diff representation — the full before/after
-      const header = `--- a/${op.path}\n+++ b/${op.path}`
-      // For now, show full replacement (not optimal but correct)
-      const hunk = `@@ -1,${oldLines.length} +1,${newLines.length} @@\n` +
-        oldLines.map((l) => `-${l}`).join('\n') + '\n' +
-        newLines.map((l) => `+${l}`).join('\n')
-      diffs.push(`${header}\n${hunk}`)
-    } else if (op.action === 'patch' && op.diff !== undefined) {
-      // Apply the patch to get the new content, then compute diff
-      const newContent = applyPatch(originalContent, op.diff)
-      const oldLines = originalContent.split('\n')
-      const newLines = newContent.split('\n')
-      const header = `--- a/${op.path}\n+++ b/${op.path}`
-      const hunk = `@@ -1,${oldLines.length} +1,${newLines.length} @@\n` +
-        oldLines.map((l) => `-${l}`).join('\n') + '\n' +
-        newLines.map((l) => `+${l}`).join('\n')
-      diffs.push(`${header}\n${hunk}`)
+  for (const line of statusOutput.trim().split('\n')) {
+    if (!line.trim()) continue
+    const [status, ...pathParts] = line.split('\t')
+    const filePath = pathParts.join('\t')
+
+    if (status === 'D') {
+      operations.push({ path: filePath, action: 'delete' })
+    } else if (status === 'M' || status === 'A') {
+      const newContent = fs.readFileSync(path.join(worktreePath, filePath), 'utf-8')
+      operations.push({ path: filePath, action: 'modify', newContent })
     }
   }
 
-  return diffs.join('\n\n')
+  return operations
 }
 
 // --- Main orchestrator ---
@@ -400,7 +310,7 @@ function computeDiff(
 export async function carveFeatures(
   repoPath: string,
   options: {
-    count?: number // Number of features to carve (default: 10)
+    count?: number
     outputPath?: string
   } = {},
 ): Promise<CarveResult> {
@@ -436,10 +346,10 @@ export async function carveFeatures(
       const carved = await carveFeature(repoPath, candidate)
       if (carved) {
         features.push(carved)
-        console.log(`  ✓ ${carved.id} — ${carved.operations.length} file operations`)
+        console.log(`  Done: ${carved.id} — ${carved.operations.length} file operations`)
       }
     } catch (error) {
-      console.error(`  ✗ ${candidate.id} failed:`, error)
+      console.error(`  Failed: ${candidate.id}:`, error)
     }
   }
 
