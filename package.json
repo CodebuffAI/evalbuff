@@ -11,7 +11,8 @@
     "test:integration": "bun test src/__tests__/loop.integration.test.ts",
     "test:e2e": "bun test src/__tests__/e2e.test.ts",
     "test:e2e-real": "bun run src/run-e2e-test.ts",
-    "run": "bun run src/run-evalbuff.ts"
+    "run": "bun run src/run-evalbuff.ts",
+    "run:overnight": "bun run src/run-overnight.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^2.0.50",

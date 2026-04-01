@@ -10,15 +10,18 @@ export class ClaudeRunner implements Runner {
   private cwd: string
   private env: Record<string, string>
   private model: string
+  private effort?: string
 
   constructor(
     cwd: string,
     env: Record<string, string> = {},
     model: string = 'claude-opus-4-5-20251101',
+    effort?: string,
   ) {
     this.cwd = cwd
     this.env = env
     this.model = model
+    this.effort = effort
   }
 
   async run(prompt: string): Promise<RunnerResult> {
@@ -35,6 +38,7 @@ export class ClaudeRunner implements Runner {
         '--dangerously-skip-permissions',
         '--model',
         this.model,
+        ...(this.effort ? ['--effort', this.effort] : []),
       ]
 
       console.log(`[ClaudeRunner] Running: claude ${args.join(' ')}`)
