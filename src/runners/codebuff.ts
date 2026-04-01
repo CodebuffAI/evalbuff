@@ -2,6 +2,8 @@ import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
+import { captureGitDiff } from '../eval-helpers'
+
 import type { Runner, RunnerResult, AgentStep } from './runner'
 import type { CodebuffClient } from '@codebuff/sdk'
 
@@ -41,6 +43,12 @@ export class CodebuffRunner implements Runner {
   async run(prompt: string): Promise<RunnerResult> {
     const steps: AgentStep[] = []
     let totalCostUsd = 0
+
+    const baseSha = execSync('git rev-parse HEAD', {
+      cwd: this.cwd,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
 
     const maxAgentSteps = 40
     const result = await this.client.run({
@@ -120,12 +128,7 @@ export class CodebuffRunner implements Runner {
     // Get git diff after Codebuff has made changes
     let diff = ''
     try {
-      execSync('git add .', { cwd: this.cwd, stdio: 'ignore' })
-      diff = execSync(`git diff ${this.parentSha}`, {
-        cwd: this.cwd,
-        encoding: 'utf-8',
-        maxBuffer: 10 * 1024 * 1024,
-      })
+      diff = captureGitDiff(this.cwd, { baseRef: baseSha })
     } catch {
       // Ignore git errors
     }

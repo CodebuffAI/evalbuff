@@ -1,23 +1,26 @@
-import { execFileSync } from 'child_process'
-import fs from 'fs'
-import path from 'path'
+import { execFileSync } from "child_process"
+import fs from "fs"
+import path from "path"
 
-import type { CarvedFeature, FileOperation } from './carve-features'
-import type { AgentStep } from './runners/runner'
+import type { CarvedFeature, FileOperation } from "./carve-features"
+import type { AgentStep } from "./runners/runner"
 
 export function selectRandom<T>(items: T[], count: number): T[] {
   const shuffled = [...items].sort(() => Math.random() - 0.5)
   return shuffled.slice(0, count)
 }
 
-export function applyCarveOperations(repoDir: string, operations: FileOperation[]): void {
+export function applyCarveOperations(
+  repoDir: string,
+  operations: FileOperation[],
+): void {
   for (const op of operations) {
     const fullPath = path.join(repoDir, op.path)
-    if (op.action === 'delete') {
+    if (op.action === "delete") {
       if (fs.existsSync(fullPath)) {
         fs.rmSync(fullPath)
       }
-    } else if (op.action === 'modify' && op.newContent !== undefined) {
+    } else if (op.action === "modify" && op.newContent !== undefined) {
       fs.mkdirSync(path.dirname(fullPath), { recursive: true })
       fs.writeFileSync(fullPath, op.newContent)
     }
@@ -29,18 +32,43 @@ const DOC_PATH_PATTERN = /(?:^|\/)(?:docs\/|AGENTS\.md|CLAUDE\.md)/
 export function extractDocsRead(steps: AgentStep[]): string[] {
   const seen = new Set<string>()
   for (const step of steps) {
-    if (step.type !== 'tool_call') continue
-    const filePath: string | undefined =
-      step.input?.file_path || step.input?.path || step.input?.command
-    if (typeof filePath !== 'string') continue
+    if (step.type !== "tool_call") continue
 
-    if ((step.toolName === 'Read' || step.toolName === 'read_file') && DOC_PATH_PATTERN.test(filePath)) {
-      const match = filePath.match(/((?:docs\/\S+|AGENTS\.md|CLAUDE\.md))/)
-      if (match) seen.add(match[1])
+    const toolName = step.toolName
+
+    // Handle read tools (canonical: Read, read_file; Codebuff-native: read_files)
+    if (
+      toolName === "Read" ||
+      toolName === "read_file" ||
+      toolName === "read_files"
+    ) {
+      // Check single-path fields
+      const filePath: string | undefined =
+        step.input?.file_path || step.input?.path
+      if (typeof filePath === "string" && DOC_PATH_PATTERN.test(filePath)) {
+        const match = filePath.match(/((?:docs\/\S+|AGENTS\.md|CLAUDE\.md))/)
+        if (match) seen.add(match[1])
+      }
+      // Check array-of-paths (Codebuff read_files emits input.paths)
+      const paths: unknown = step.input?.paths
+      if (Array.isArray(paths)) {
+        for (const p of paths) {
+          if (typeof p === "string" && DOC_PATH_PATTERN.test(p)) {
+            const match = p.match(/((?:docs\/\S+|AGENTS\.md|CLAUDE\.md))/)
+            if (match) seen.add(match[1])
+          }
+        }
+      }
+      continue
     }
-    if (step.toolName === 'shell' && DOC_PATH_PATTERN.test(filePath)) {
-      const matches = filePath.match(/((?:docs\/\S+|AGENTS\.md|CLAUDE\.md))/g)
-      if (matches) for (const m of matches) seen.add(m)
+
+    // Handle shell tools (canonical: shell; Codebuff-native: run_terminal_command)
+    if (toolName === "shell" || toolName === "run_terminal_command") {
+      const command: string | undefined = step.input?.command
+      if (typeof command === "string" && DOC_PATH_PATTERN.test(command)) {
+        const matches = command.match(/((?:docs\/\S+|AGENTS\.md|CLAUDE\.md))/g)
+        if (matches) for (const m of matches) seen.add(m)
+      }
     }
   }
   return [...seen].sort()
@@ -49,23 +77,24 @@ export function extractDocsRead(steps: AgentStep[]): string[] {
 export function computeGroundTruthDiff(feature: CarvedFeature): string {
   const diffs: string[] = []
   for (const op of feature.operations) {
-    if (op.action === 'delete' && feature.originalFiles[op.path]) {
-      const lines = feature.originalFiles[op.path].split('\n')
+    if (op.action === "delete" && feature.originalFiles[op.path]) {
+      const lines = feature.originalFiles[op.path].split("\n")
       diffs.push(
         `--- /dev/null\n+++ b/${op.path}\n@@ -0,0 +1,${lines.length} @@\n` +
-          lines.map((l) => `+${l}`).join('\n'),
+          lines.map((l) => `+${l}`).join("\n"),
       )
-    } else if (op.action === 'modify' && feature.originalFiles[op.path]) {
-      const origLines = feature.originalFiles[op.path].split('\n')
-      const carvedLines = (op.newContent || '').split('\n')
+    } else if (op.action === "modify" && feature.originalFiles[op.path]) {
+      const origLines = feature.originalFiles[op.path].split("\n")
+      const carvedLines = (op.newContent || "").split("\n")
       diffs.push(
         `--- a/${op.path}\n+++ b/${op.path}\n@@ -1,${carvedLines.length} +1,${origLines.length} @@\n` +
-          carvedLines.map((l) => `-${l}`).join('\n') + '\n' +
-          origLines.map((l) => `+${l}`).join('\n'),
+          carvedLines.map((l) => `-${l}`).join("\n") +
+          "\n" +
+          origLines.map((l) => `+${l}`).join("\n"),
       )
     }
   }
-  return diffs.join('\n\n')
+  return diffs.join("\n\n")
 }
 
 export function getGroundTruthDiff(feature: CarvedFeature): string {
@@ -75,13 +104,13 @@ export function getGroundTruthDiff(feature: CarvedFeature): string {
 
 export function ensureGitIdentity(repoPath: string): void {
   try {
-    execFileSync('git', ['config', 'user.name', 'Evalbuff'], {
+    execFileSync("git", ["config", "user.name", "Evalbuff"], {
       cwd: repoPath,
-      stdio: 'ignore',
+      stdio: "ignore",
     })
-    execFileSync('git', ['config', 'user.email', 'evalbuff@example.invalid'], {
+    execFileSync("git", ["config", "user.email", "evalbuff@example.invalid"], {
       cwd: repoPath,
-      stdio: 'ignore',
+      stdio: "ignore",
     })
   } catch {
     // best-effort only
@@ -95,19 +124,19 @@ export function captureGitDiff(
     pathspecs?: string[]
   } = {},
 ): string {
-  const { baseRef = 'HEAD', pathspecs = [] } = options
-  const trackedArgs = ['diff', '--binary', baseRef]
-  if (pathspecs.length > 0) trackedArgs.push('--', ...pathspecs)
+  const { baseRef = "HEAD", pathspecs = [] } = options
+  const trackedArgs = ["diff", "--binary", baseRef]
+  if (pathspecs.length > 0) trackedArgs.push("--", ...pathspecs)
 
-  let trackedDiff = ''
+  let trackedDiff = ""
   try {
-    trackedDiff = execFileSync('git', trackedArgs, {
+    trackedDiff = execFileSync("git", trackedArgs, {
       cwd: repoPath,
-      encoding: 'utf-8',
+      encoding: "utf-8",
       maxBuffer: 10 * 1024 * 1024,
     })
   } catch {
-    trackedDiff = ''
+    trackedDiff = ""
   }
 
   const untrackedFiles = listUntrackedFiles(repoPath, pathspecs)
@@ -117,30 +146,40 @@ export function captureGitDiff(
 
   return [trackedDiff.trimEnd(), ...untrackedDiffs.map((d) => d.trimEnd())]
     .filter(Boolean)
-    .join('\n')
+    .join("\n")
 }
 
-export function copyDocsIntoRepo(sourceRepoPath: string, targetRepoPath: string): void {
+export function copyDocsIntoRepo(
+  sourceRepoPath: string,
+  targetRepoPath: string,
+): void {
   const changedPaths = syncDocsIntoRepo(sourceRepoPath, targetRepoPath)
 
   if (changedPaths.length > 0) {
     ensureGitIdentity(targetRepoPath)
     try {
-      execFileSync('git', ['add', '-A', '--', ...changedPaths], {
+      execFileSync("git", ["add", "-A", "--", ...changedPaths], {
         cwd: targetRepoPath,
-        stdio: 'ignore',
+        stdio: "ignore",
       })
-      execFileSync('git', ['commit', '-m', 'evalbuff: pre-load docs', '--allow-empty'], {
-        cwd: targetRepoPath,
-        stdio: 'ignore',
-      })
+      execFileSync(
+        "git",
+        ["commit", "-m", "evalbuff: pre-load docs", "--allow-empty"],
+        {
+          cwd: targetRepoPath,
+          stdio: "ignore",
+        },
+      )
     } catch {
       // fine
     }
   }
 }
 
-export function syncDocsIntoRepo(sourceRepoPath: string, targetRepoPath: string): string[] {
+export function syncDocsIntoRepo(
+  sourceRepoPath: string,
+  targetRepoPath: string,
+): string[] {
   const sourceDocs = getDocsSnapshot(sourceRepoPath)
   const targetDocs = getDocsSnapshot(targetRepoPath)
   const changed = new Set<string>()
@@ -165,32 +204,38 @@ export function syncDocsIntoRepo(sourceRepoPath: string, targetRepoPath: string)
 
 export function getDocsSnapshot(repoPath: string): Record<string, string> {
   const docs: Record<string, string> = {}
-  const docsDir = path.join(repoPath, 'docs')
+  const docsDir = path.join(repoPath, "docs")
 
   if (fs.existsSync(docsDir)) {
     function readDir(dir: string, prefix: string) {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (entry.isDirectory()) {
           readDir(path.join(dir, entry.name), `${prefix}${entry.name}/`)
-        } else if (entry.name.endsWith('.md')) {
-          docs[`docs/${prefix}${entry.name}`] = fs.readFileSync(path.join(dir, entry.name), 'utf-8')
+        } else if (entry.name.endsWith(".md")) {
+          docs[`docs/${prefix}${entry.name}`] = fs.readFileSync(
+            path.join(dir, entry.name),
+            "utf-8",
+          )
         }
       }
     }
-    readDir(docsDir, '')
+    readDir(docsDir, "")
   }
 
-  for (const file of ['AGENTS.md', 'CLAUDE.md']) {
+  for (const file of ["AGENTS.md", "CLAUDE.md"]) {
     const p = path.join(repoPath, file)
     if (fs.existsSync(p)) {
-      docs[file] = fs.readFileSync(p, 'utf-8')
+      docs[file] = fs.readFileSync(p, "utf-8")
     }
   }
 
   return docs
 }
 
-export function computeDocsDiffText(before: Record<string, string>, after: Record<string, string>): string {
+export function computeDocsDiffText(
+  before: Record<string, string>,
+  after: Record<string, string>,
+): string {
   const lines: string[] = []
   const allKeys = new Set([...Object.keys(before), ...Object.keys(after)])
 
@@ -200,13 +245,13 @@ export function computeDocsDiffText(before: Record<string, string>, after: Recor
       lines.push(after[key])
     } else if (!(key in after)) {
       lines.push(`\n=== DELETED FILE: ${key} ===`)
-      lines.push(`(was ${before[key].split('\n').length} lines)`)
+      lines.push(`(was ${before[key].split("\n").length} lines)`)
     } else if (before[key] !== after[key]) {
       lines.push(`\n=== MODIFIED FILE: ${key} ===`)
       lines.push(`--- before`)
       lines.push(`+++ after`)
-      const oldLines = before[key].split('\n')
-      const newLines = after[key].split('\n')
+      const oldLines = before[key].split("\n")
+      const newLines = after[key].split("\n")
       const maxLen = Math.max(oldLines.length, newLines.length)
       for (let i = 0; i < maxLen; i++) {
         if (i >= oldLines.length) {
@@ -221,19 +266,19 @@ export function computeDocsDiffText(before: Record<string, string>, after: Recor
     }
   }
 
-  return lines.join('\n')
+  return lines.join("\n")
 }
 
 function listUntrackedFiles(repoPath: string, pathspecs: string[]): string[] {
-  const args = ['ls-files', '--others', '--exclude-standard']
-  if (pathspecs.length > 0) args.push('--', ...pathspecs)
+  const args = ["ls-files", "--others", "--exclude-standard"]
+  if (pathspecs.length > 0) args.push("--", ...pathspecs)
 
   try {
-    const output = execFileSync('git', args, {
+    const output = execFileSync("git", args, {
       cwd: repoPath,
-      encoding: 'utf-8',
+      encoding: "utf-8",
     }).trim()
-    return output ? output.split('\n').filter(Boolean) : []
+    return output ? output.split("\n").filter(Boolean) : []
   } catch {
     return []
   }
@@ -241,22 +286,27 @@ function listUntrackedFiles(repoPath: string, pathspecs: string[]): string[] {
 
 function captureUntrackedFileDiff(repoPath: string, filePath: string): string {
   try {
-    return execFileSync('git', ['diff', '--binary', '--no-index', '--', '/dev/null', filePath], {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      maxBuffer: 10 * 1024 * 1024,
-    })
+    return execFileSync(
+      "git",
+      ["diff", "--binary", "--no-index", "--", "/dev/null", filePath],
+      {
+        cwd: repoPath,
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    )
   } catch (error) {
-    const output = error instanceof Error && 'stdout' in error
-      ? String((error as { stdout?: Buffer | string }).stdout || '')
-      : ''
+    const output =
+      error instanceof Error && "stdout" in error
+        ? String((error as { stdout?: Buffer | string }).stdout || "")
+        : ""
     return output
   }
 }
 
 function removeEmptyDocDirs(repoPath: string, filePath: string): void {
   let currentDir = path.dirname(path.join(repoPath, filePath))
-  const docsRoot = path.join(repoPath, 'docs')
+  const docsRoot = path.join(repoPath, "docs")
 
   while (currentDir.startsWith(docsRoot) && currentDir !== docsRoot) {
     try {
@@ -269,7 +319,11 @@ function removeEmptyDocDirs(repoPath: string, filePath: string): void {
   }
 
   try {
-    if (currentDir === docsRoot && fs.existsSync(docsRoot) && fs.readdirSync(docsRoot).length === 0) {
+    if (
+      currentDir === docsRoot &&
+      fs.existsSync(docsRoot) &&
+      fs.readdirSync(docsRoot).length === 0
+    ) {
       fs.rmdirSync(docsRoot)
     }
   } catch {
