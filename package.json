@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
-    "test": "bun test src/__tests__/trace-compressor.test.ts",
+    "test": "bun test --path-ignore-patterns '**/*.e2e.test.ts'",
     "test:all": "bun test",
     "test:e2e": "bun test src/__tests__/*.e2e.test.ts",
     "run": "bun run src/run-evalbuff.ts",

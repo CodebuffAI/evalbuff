@@ -5,7 +5,7 @@ Tests live in `src/__tests__/`.
 ## Scripts
 
 ```bash
-bun run test               # Fast regression (trace-compressor only)
+bun run test               # All non-E2E tests (ignores **/*.e2e.test.ts)
 bun run test:all           # Everything under src/__tests__/
 bun run test:e2e           # Live-agent E2E suites only (*.e2e.test.ts)
 bun run typecheck          # Type checking
