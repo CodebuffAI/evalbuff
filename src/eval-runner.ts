@@ -100,16 +100,22 @@ export async function runAgentOnCarve(opts: {
     const compressed = compressTrace(rawTrace, traceDir)
     const agentTrace = compressed.inline
 
-    // Judge with Codex reviewer
+    // Judge with Codex reviewer (hard 35-minute timeout to prevent hangs)
+    const JUDGE_TIMEOUT_MS = 35 * 60 * 1000
     console.log(`  [Run ${idx + 1}/${total}] Judging ${feature.id} with Codex reviewer...`)
     let judging: JudgingResult
     try {
-      judging = await judgeTaskResult({
-        taskPrompt: feature.prompt,
-        agentDiff: result.diff,
-        groundTruthDiff,
-        repoDir: repoDir,
-      })
+      judging = await Promise.race([
+        judgeTaskResult({
+          taskPrompt: feature.prompt,
+          agentDiff: result.diff,
+          groundTruthDiff,
+          repoDir: repoDir,
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Judge timed out after ${JUDGE_TIMEOUT_MS / 1000}s`)), JUDGE_TIMEOUT_MS),
+        ),
+      ])
     } catch (judgeError) {
       const errMsg = judgeError instanceof Error ? judgeError.message : String(judgeError)
       console.warn(`  [Run ${idx + 1}/${total}] Judge failed: ${errMsg.slice(0, 200)}`)
