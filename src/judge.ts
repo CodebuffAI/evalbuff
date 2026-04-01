@@ -202,6 +202,7 @@ async function runCodexReviewer(
     approvalPolicy: 'never',
     sandboxMode: 'workspace-write',
     webSearchMode: 'live',
+    modelReasoningEffort: 'high',
   })
 
   console.log(`[Reviewer:codex] Starting review in ${cwd}`)

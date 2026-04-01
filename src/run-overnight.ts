@@ -424,7 +424,7 @@ Rules:
 - Be specific and actionable — reference concrete file paths, patterns, and conventions.`
 
   try {
-    const runner = new ClaudeRunner(repoPath, {}, model)
+    const runner = new ClaudeRunner(repoPath, {}, model, 'high')
     await runner.run(prompt)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
