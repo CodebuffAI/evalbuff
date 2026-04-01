@@ -1,4 +1,3 @@
-import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
@@ -41,10 +40,6 @@ export const JudgingResultSchema = z.object({
 })
 
 export type JudgingResult = z.infer<typeof JudgingResultSchema>
-
-// --- Reviewer agent types ---
-
-export type ReviewerAgentType = 'claude' | 'codex' | 'gemini'
 
 const RESULT_FILE_NAME = 'evalbuff-review-result.json'
 
@@ -289,22 +284,12 @@ export interface JudgeTaskResultInput {
   groundTruthDiff?: string
   repoDir: string
   error?: string
-  reviewerAgents?: ReviewerAgentType[]
-  env?: Record<string, string>
 }
 
 export async function judgeTaskResult(
   input: JudgeTaskResultInput,
 ): Promise<JudgingResult> {
-  const {
-    taskPrompt,
-    agentDiff,
-    groundTruthDiff,
-    repoDir,
-    error,
-    reviewerAgents = ['codex', 'codex'],
-    env,
-  } = input
+  const { taskPrompt, agentDiff, groundTruthDiff, repoDir, error } = input
 
   const prompt = buildReviewerPrompt({
     taskPrompt,
@@ -314,100 +299,17 @@ export async function judgeTaskResult(
     docsDir: fs.existsSync(path.join(repoDir, 'docs')) ? repoDir : undefined,
   })
 
-  return runReviewersAndAggregate(prompt, repoDir, reviewerAgents, env)
-}
-
-/**
- * Shared logic: run Codex reviewer agents in parallel and aggregate results.
- */
-async function runReviewersAndAggregate(
-  prompt: string,
-  repoDir: string,
-  reviewerAgents: ReviewerAgentType[],
-  env?: Record<string, string>,
-): Promise<JudgingResult> {
-  const reviewPromises = reviewerAgents.map(async (agentType, idx) => {
-    const reviewDir = `${repoDir}-review-${agentType}-${idx}`
-    try {
-      const nodeModulesPath = path.join(repoDir, 'node_modules')
-      const hasNodeModules = fs.existsSync(nodeModulesPath)
-      if (hasNodeModules) {
-        execSync(
-          `rsync -a --exclude node_modules "${repoDir}/" "${reviewDir}/"`,
-          { stdio: 'ignore' },
-        )
-        fs.symlinkSync(nodeModulesPath, path.join(reviewDir, 'node_modules'))
-      } else {
-        execSync(`cp -r "${repoDir}" "${reviewDir}"`, { stdio: 'ignore' })
-      }
-
-      // All reviewers use the Codex SDK
-      return await runCodexReviewer(prompt, reviewDir)
-    } finally {
-      try {
-        fs.rmSync(reviewDir, { recursive: true, force: true })
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-  })
-
-  const results = await Promise.all(reviewPromises)
-  const validResults = results.filter(
-    (r): r is JudgingResult => r !== null,
-  )
-
-  if (validResults.length === 0) {
-    console.error(
-      `All reviewer agents failed (${reviewerAgents.join(', ')})`,
-    )
-    return {
-      analysis: 'Error: all reviewer agents failed to provide results',
-      strengths: [],
-      weaknesses: ['All reviewer agents failed'],
-      e2eTestsPerformed: [],
-      completionScore: 0,
-      codeQualityScore: 0,
-      e2eScore: 0,
-      overallScore: 0,
-    }
-  }
-
-  // Use median for qualitative analysis (pick the most representative reviewer)
-  // but average for scores. Averaging is better because models have consistent
-  // scoring biases (e.g. GPT-5 scores lower) — median would always pick the
-  // same model's score, while average blends them.
-  const sorted = validResults.sort(
-    (a, b) => a.overallScore - b.overallScore,
-  )
-  const medianIdx = Math.floor(sorted.length / 2)
-  const medianResult = sorted[medianIdx]
-
-  const avg = (key: keyof JudgingResult) =>
-    validResults.reduce((sum, r) => sum + (r[key] as number), 0) /
-    validResults.length
-
-  const avgCompletionScore = avg('completionScore')
-  const avgCodeQualityScore = avg('codeQualityScore')
-  const avgE2eScore = avg('e2eScore')
-  const avgOverallScore = avg('overallScore')
-
-  const allE2eTests = [
-    ...new Set(validResults.flatMap((r) => r.e2eTestsPerformed)),
-  ]
-
-  console.log(
-    `Review results: overall=${avgOverallScore.toFixed(1)}, e2e=${avgE2eScore.toFixed(1)} (${validResults.length}/${reviewerAgents.length} reviewers)`,
-  )
+  const result = await runCodexReviewer(prompt, repoDir)
+  if (result) return result
 
   return {
-    analysis: medianResult.analysis,
-    strengths: medianResult.strengths,
-    weaknesses: medianResult.weaknesses,
-    e2eTestsPerformed: allE2eTests,
-    completionScore: avgCompletionScore,
-    codeQualityScore: avgCodeQualityScore,
-    e2eScore: avgE2eScore,
-    overallScore: avgOverallScore,
+    analysis: 'Error: reviewer agent failed to provide results',
+    strengths: [],
+    weaknesses: ['Reviewer agent failed'],
+    e2eTestsPerformed: [],
+    completionScore: 0,
+    codeQualityScore: 0,
+    e2eScore: 0,
+    overallScore: 0,
   }
 }
