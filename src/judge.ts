@@ -1,11 +1,13 @@
-import { execSync, spawn } from 'child_process'
+import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
+import { Codex } from '@openai/codex-sdk'
 import { z } from 'zod/v4'
 
 import { formatCriteriaForPrompt } from './criteria'
 
+import type { ThreadItem } from '@openai/codex-sdk'
 import type { QualityCriteria } from './criteria'
 import type { EvalCommitV2 } from './types'
 
@@ -43,43 +45,6 @@ export type JudgingResult = z.infer<typeof JudgingResultSchema>
 // --- Reviewer agent types ---
 
 export type ReviewerAgentType = 'claude' | 'codex' | 'gemini'
-
-interface ReviewerConfig {
-  type: ReviewerAgentType
-  command: string[]
-  env?: Record<string, string>
-  timeoutMs: number
-}
-
-const REVIEWER_CONFIGS: Record<ReviewerAgentType, ReviewerConfig> = {
-  claude: {
-    type: 'claude',
-    command: [
-      'claude',
-      '-p',
-      '__PROMPT__',
-      '--dangerously-skip-permissions',
-    ],
-    timeoutMs: 30 * 60 * 1000,
-  },
-  codex: {
-    type: 'codex',
-    command: [
-      'codex',
-      'exec',
-      '--full-auto',
-      '-m',
-      'gpt-5.1-codex',
-      '__PROMPT__',
-    ],
-    timeoutMs: 30 * 60 * 1000,
-  },
-  gemini: {
-    type: 'gemini',
-    command: ['gemini', '--yolo', '-p', '__PROMPT__'],
-    timeoutMs: 30 * 60 * 1000,
-  },
-}
 
 const RESULT_FILE_NAME = 'evalbuff-review-result.json'
 
@@ -193,98 +158,75 @@ All scores are 0-10. The e2eScore specifically measures how well the change work
 IMPORTANT: You MUST write the result file. This is the only way your review gets recorded. Do it as your very last action.`
 }
 
-const PROMPT_FILE_NAME = 'EVALBUFF_REVIEW_PROMPT.md'
-
-const BOOTSTRAP_PROMPT = `Read the file ${PROMPT_FILE_NAME} in the current directory and follow all instructions in it exactly. The file contains a code review task. After your review and testing, you MUST write your judgment to ${RESULT_FILE_NAME} as specified in the prompt file.`
-
-async function runReviewerAgent(
-  agentType: ReviewerAgentType,
+async function runCodexReviewer(
   prompt: string,
   cwd: string,
-  env?: Record<string, string>,
+  timeoutMs: number = 30 * 60 * 1000,
 ): Promise<JudgingResult | null> {
-  const config = REVIEWER_CONFIGS[agentType]
-
-  fs.writeFileSync(path.join(cwd, PROMPT_FILE_NAME), prompt)
-
-  const args = config.command
-    .slice(1)
-    .map((a) => (a === '__PROMPT__' ? BOOTSTRAP_PROMPT : a))
-
-  const cmd = config.command[0]
-
-  console.log(`[Reviewer:${agentType}] Starting review in ${cwd}`)
-
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      cwd,
-      env: { ...process.env, ...config.env, ...env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-
-    let stdout = ''
-    let stderr = ''
-
-    const timer = setTimeout(() => {
-      console.warn(
-        `[Reviewer:${agentType}] Timed out after ${config.timeoutMs / 1000}s`,
-      )
-      child.kill('SIGTERM')
-      setTimeout(() => {
-        if (!child.killed) child.kill('SIGKILL')
-      }, 5000)
-    }, config.timeoutMs)
-
-    child.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString()
-    })
-
-    child.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString()
-    })
-
-    child.on('error', (error) => {
-      clearTimeout(timer)
-      console.error(
-        `[Reviewer:${agentType}] Failed to start: ${error.message}`,
-      )
-      resolve(null)
-    })
-
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      console.log(
-        `[Reviewer:${agentType}] Exited with code ${code}`,
-      )
-      if (code !== 0) {
-        console.warn(
-          `[Reviewer:${agentType}] stderr (last 1000 chars): ${stderr.slice(-1000)}`,
-        )
-        console.warn(
-          `[Reviewer:${agentType}] stdout (last 500 chars): ${stdout.slice(-500)}`,
-        )
-      }
-
-      const resultPath = path.join(cwd, RESULT_FILE_NAME)
-      const result = parseResultFile(resultPath, agentType)
-
-      if (result) {
-        resolve(result)
-        return
-      }
-
-      const extracted = extractJsonFromOutput(stdout, agentType)
-      if (extracted) {
-        resolve(extracted)
-        return
-      }
-
-      console.warn(
-        `[Reviewer:${agentType}] No result file or parseable output found`,
-      )
-      resolve(null)
-    })
+  const codex = new Codex({
+    apiKey: process.env.OPENAI_API_KEY,
   })
+
+  const thread = codex.startThread({
+    model: 'gpt-5.4',
+    workingDirectory: cwd,
+    approvalPolicy: 'never',
+    sandboxMode: 'workspace-write',
+    webSearchMode: 'live',
+  })
+
+  console.log(`[Reviewer:codex] Starting review in ${cwd}`)
+
+  const abortController = new AbortController()
+  const timer = setTimeout(() => {
+    console.warn(`[Reviewer:codex] Timed out after ${timeoutMs / 1000}s`)
+    abortController.abort()
+  }, timeoutMs)
+
+  try {
+    const { events } = await thread.runStreamed(prompt, {
+      signal: abortController.signal,
+    })
+
+    for await (const event of events) {
+      if (event.type === 'item.completed') {
+        logItem(event.item, 'codex')
+      } else if (event.type === 'turn.failed') {
+        console.error(`[Reviewer:codex] Turn failed: ${event.error.message}`)
+      } else if (event.type === 'error') {
+        console.error(`[Reviewer:codex] Error: ${event.message}`)
+      }
+    }
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      console.warn(`[Reviewer:codex] Aborted`)
+    } else {
+      console.error(`[Reviewer:codex] Failed: ${err.message}`)
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+
+  // Try to read the result file
+  const resultPath = path.join(cwd, RESULT_FILE_NAME)
+  return parseResultFile(resultPath, 'codex')
+}
+
+function logItem(item: ThreadItem, label: string): void {
+  switch (item.type) {
+    case 'agent_message':
+      process.stdout.write(item.text)
+      break
+    case 'command_execution':
+      console.log(`[Reviewer:${label}] $ ${item.command} (exit: ${item.exit_code})`)
+      break
+    case 'file_change':
+      console.log(`[Reviewer:${label}] File changes: ${item.changes.map(c => `${c.kind} ${c.path}`).join(', ')}`)
+      break
+    case 'error':
+      console.error(`[Reviewer:${label}] Item error: ${item.message}`)
+      break
+  }
 }
 
 function parseResultFile(
@@ -313,38 +255,6 @@ function parseResultFile(
     )
     return null
   }
-}
-
-function extractJsonFromOutput(
-  output: string,
-  agentType: string,
-): JudgingResult | null {
-  const jsonPatterns = [
-    /```(?:json)?\s*\n({[\s\S]*?})\n\s*```/g,
-    /(\{[^{}]*"overallScore"[^{}]*\})/g,
-  ]
-
-  for (const pattern of jsonPatterns) {
-    const matches = [...output.matchAll(pattern)]
-    for (let i = matches.length - 1; i >= 0; i--) {
-      try {
-        const raw = JSON.parse(matches[i][1])
-        const parsed = JudgingResultSchema.safeParse(raw)
-        if (parsed.success) {
-          console.log(
-            `[Reviewer:${agentType}] Extracted result from stdout`,
-          )
-          return parsed.data
-        }
-        const salvaged = salvagePartialResult(raw)
-        if (salvaged) return salvaged
-      } catch {
-        continue
-      }
-    }
-  }
-
-  return null
 }
 
 function salvagePartialResult(raw: any): JudgingResult | null {
@@ -384,8 +294,8 @@ export interface JudgeCommitResultInput {
 }
 
 /**
- * Judge a commit result by running reviewer agents in the repo.
- * Each reviewer agent can read docs, run the app, test E2E, and write a result file.
+ * Judge a commit result by running Codex reviewer agents in the repo.
+ * Each reviewer can read docs, run the app, test E2E, and write a result file.
  */
 export async function judgeCommitResult(
   input: JudgeCommitResultInput,
@@ -397,7 +307,7 @@ export async function judgeCommitResult(
     repoDir,
     error,
     criteria,
-    reviewerAgents = ['claude', 'codex'],
+    reviewerAgents = ['codex', 'codex'],
     env,
   } = input
 
@@ -439,7 +349,7 @@ export async function judgeTaskResult(
     repoDir,
     error,
     criteria,
-    reviewerAgents = ['claude', 'codex'],
+    reviewerAgents = ['codex', 'codex'],
     env,
   } = input
 
@@ -456,7 +366,7 @@ export async function judgeTaskResult(
 }
 
 /**
- * Shared logic: run reviewer agents in parallel and aggregate results.
+ * Shared logic: run Codex reviewer agents in parallel and aggregate results.
  */
 async function runReviewersAndAggregate(
   prompt: string,
@@ -464,8 +374,8 @@ async function runReviewersAndAggregate(
   reviewerAgents: ReviewerAgentType[],
   env?: Record<string, string>,
 ): Promise<JudgingResult> {
-  const reviewPromises = reviewerAgents.map(async (agentType) => {
-    const reviewDir = `${repoDir}-review-${agentType}`
+  const reviewPromises = reviewerAgents.map(async (agentType, idx) => {
+    const reviewDir = `${repoDir}-review-${agentType}-${idx}`
     try {
       const nodeModulesPath = path.join(repoDir, 'node_modules')
       const hasNodeModules = fs.existsSync(nodeModulesPath)
@@ -478,7 +388,9 @@ async function runReviewersAndAggregate(
       } else {
         execSync(`cp -r "${repoDir}" "${reviewDir}"`, { stdio: 'ignore' })
       }
-      return await runReviewerAgent(agentType, prompt, reviewDir)
+
+      // All reviewers use the Codex SDK
+      return await runCodexReviewer(prompt, reviewDir)
     } finally {
       try {
         fs.rmSync(reviewDir, { recursive: true, force: true })
