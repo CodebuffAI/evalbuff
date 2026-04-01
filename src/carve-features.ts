@@ -15,6 +15,8 @@ import path from 'path'
 
 import OpenAI from 'openai'
 
+import { applyPatch } from './apply-patch'
+
 // --- Types ---
 
 export interface CarveCandidate {
@@ -23,6 +25,7 @@ export interface CarveCandidate {
   prompt: string // Short, natural prompt to rebuild this feature
   description: string // What this feature does
   files: string[] // Files involved (to delete or modify)
+  relevantFiles: string[] // Other files worth reading for context (importers, related modules, etc.)
   complexity: 'small' | 'medium' | 'large'
 }
 
@@ -33,9 +36,11 @@ export interface CarvePlan {
 
 export interface FileOperation {
   path: string
-  action: 'delete' | 'modify'
+  action: 'delete' | 'modify' | 'patch'
   /** For 'modify': the new file content with the feature removed */
   newContent?: string
+  /** For 'patch': a unified diff to apply to the file */
+  diff?: string
 }
 
 export interface CarvedFeature {
@@ -168,10 +173,14 @@ Respond with valid JSON matching this schema:
       "prompt": "Natural prompt a developer would use to ask for this feature, 1-2 sentences",
       "description": "What this feature does and why it exists",
       "files": ["path/to/file1.ts", "path/to/file2.tsx"],
+      "relevantFiles": ["path/to/importer.ts", "path/to/related.ts"],
       "complexity": "small|medium|large"
     }
   ]
 }
+
+- **files**: The files that ARE the feature (to be deleted or modified to remove it).
+- **relevantFiles**: Other files worth reading for context — files that import or reference the feature, related modules, config files, etc. These help understand how the feature is wired in.
 
 Be thorough in listing ALL files involved in each feature — missing a file means the carve won't be clean.`
 
@@ -258,12 +267,19 @@ Respond with valid JSON matching this schema:
       "path": "path/to/other-file.ts",
       "action": "modify",
       "newContent": "...full file content with feature removed..."
+    },
+    {
+      "path": "path/to/another-file.ts",
+      "action": "patch",
+      "diff": "...unified diff..."
     }
   ]
 }
 
-For "modify" operations, provide the COMPLETE new file content (not a diff). This must be the entire file with only the feature-related code removed.
-For "delete" operations, the entire file will be removed.
+Three action types:
+- **"delete"** — remove the entire file.
+- **"modify"** — provide the COMPLETE new file content. Best for small files or when most of the file changes.
+- **"patch"** — provide a unified diff to apply. Best for large files where only a small portion changes. Use standard unified diff format with context lines (space prefix), deletions (- prefix), and additions (+ prefix), with @@ hunk headers.
 
 Only include files that actually need to change. Don't include files that are unaffected.`
 
@@ -273,49 +289,20 @@ export async function carveFeature(
 ): Promise<CarvedFeature | null> {
   const client = getClient()
 
-  // Read all files involved
-  const fileContents: Record<string, string> = {}
-  for (const filePath of candidate.files) {
-    const content = readFile(repoPath, filePath)
-    if (content) {
-      fileContents[filePath] = content
-    }
-  }
-
-  if (Object.keys(fileContents).length === 0) {
-    console.warn(`  No readable files for feature ${candidate.id}, skipping`)
-    return null
-  }
-
-  // Also read files that might reference the feature's files (importers)
-  const referenceFiles = findReferencingFiles(repoPath, candidate.files)
-  for (const refFile of referenceFiles) {
-    if (!fileContents[refFile]) {
-      const content = readFile(repoPath, refFile)
-      if (content) {
-        fileContents[refFile] = content
-      }
-    }
-  }
-
-  let filesSection = ''
-  for (const [filePath, content] of Object.entries(fileContents)) {
-    const isFeatureFile = candidate.files.includes(filePath)
-    const label = isFeatureFile ? '(FEATURE FILE)' : '(REFERENCING FILE)'
-    filesSection += `\n### ${filePath} ${label}\n\`\`\`\n${content}\n\`\`\`\n`
-  }
+  const allPaths = [...new Set([...candidate.files, ...(candidate.relevantFiles || [])])]
 
   const userPrompt = `## Feature to Remove
 **Name:** ${candidate.name}
 **Description:** ${candidate.description}
-**Feature files:** ${candidate.files.join(', ')}
 
-## Current File Contents
-${filesSection}
+**Feature files (to delete or modify):** ${candidate.files.join(', ')}
+**Other relevant files to check:** ${candidate.relevantFiles?.join(', ') || '(none)'}
 
-Remove this feature completely. For files that are entirely part of the feature, use "delete". For files that contain the feature mixed with other code, use "modify" and provide the full updated content.`
+Read the files listed above. Also look for any other files that import or reference the feature — the lists above may not be exhaustive. Then remove this feature completely.
 
-  console.log(`  Carving feature: ${candidate.id}...`)
+For files that are entirely part of the feature, use "delete". For files that contain the feature mixed with other code, use "modify" and provide the full updated content.`
+
+  console.log(`  Carving feature: ${candidate.id} (${allPaths.length} relevant paths)...`)
   const response = await client.chat.completions.create({
     model: CARVING_MODEL,
     messages: [
@@ -339,8 +326,9 @@ Remove this feature completely. For files that are entirely part of the feature,
   // Save original files (only the feature files, for judging)
   const originalFiles: Record<string, string> = {}
   for (const filePath of candidate.files) {
-    if (fileContents[filePath]) {
-      originalFiles[filePath] = fileContents[filePath]
+    const content = readFile(repoPath, filePath)
+    if (content) {
+      originalFiles[filePath] = content
     }
   }
 
@@ -356,51 +344,6 @@ Remove this feature completely. For files that are entirely part of the feature,
 }
 
 // --- Helpers ---
-
-/**
- * Find files that import/reference any of the given files.
- * Uses git grep to find import statements.
- */
-function findReferencingFiles(
-  repoPath: string,
-  featureFiles: string[],
-): string[] {
-  const referencingFiles = new Set<string>()
-
-  for (const featureFile of featureFiles) {
-    // Extract the module name (without extension) for import matching
-    const basename = path.basename(featureFile).replace(/\.[^.]+$/, '')
-    const dirname = path.dirname(featureFile)
-
-    // Search for imports of this file
-    try {
-      const results = execSync(
-        `git grep -l "${basename}" -- '*.ts' '*.tsx' '*.js' '*.jsx'`,
-        {
-          cwd: repoPath,
-          encoding: 'utf-8',
-          maxBuffer: 10 * 1024 * 1024,
-        },
-      )
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-
-      for (const result of results) {
-        // Don't include the feature's own files
-        if (!featureFiles.includes(result)) {
-          referencingFiles.add(result)
-        }
-      }
-    } catch {
-      // git grep returns exit code 1 when no matches
-    }
-  }
-
-  // Limit to reasonable number
-  const sorted = [...referencingFiles].slice(0, 20)
-  return sorted
-}
 
 /**
  * Compute a unified diff from file operations.
@@ -432,6 +375,16 @@ function computeDiff(
       // Use a simple diff representation — the full before/after
       const header = `--- a/${op.path}\n+++ b/${op.path}`
       // For now, show full replacement (not optimal but correct)
+      const hunk = `@@ -1,${oldLines.length} +1,${newLines.length} @@\n` +
+        oldLines.map((l) => `-${l}`).join('\n') + '\n' +
+        newLines.map((l) => `+${l}`).join('\n')
+      diffs.push(`${header}\n${hunk}`)
+    } else if (op.action === 'patch' && op.diff !== undefined) {
+      // Apply the patch to get the new content, then compute diff
+      const newContent = applyPatch(originalContent, op.diff)
+      const oldLines = originalContent.split('\n')
+      const newLines = newContent.split('\n')
+      const header = `--- a/${op.path}\n+++ b/${op.path}`
       const hunk = `@@ -1,${oldLines.length} +1,${newLines.length} @@\n` +
         oldLines.map((l) => `-${l}`).join('\n') + '\n' +
         newLines.map((l) => `+${l}`).join('\n')
