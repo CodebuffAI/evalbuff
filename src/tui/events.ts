@@ -141,6 +141,11 @@ class EvalbuffEventBus extends EventEmitter {
     this.send({ type: 'log', level, message })
   }
 
+  /** Clear the event buffer (for switching between runs) */
+  clearBuffer(): void {
+    this._buffer = []
+  }
+
   /** Close the log stream */
   close(): void {
     this.logStream?.end()

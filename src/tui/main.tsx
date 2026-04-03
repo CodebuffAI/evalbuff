@@ -44,10 +44,12 @@ async function startTui() {
     process.exit(1)
   })
 
-  createRoot(renderer).render(<App />)
-  renderer.start()
-
   return renderer
+}
+
+function renderApp(r: CliRenderer, startView: 'dashboard' | 'run_picker', onLoadRun: (dir: string) => void) {
+  createRoot(r).render(<App startView={startView} onLoadRun={onLoadRun} />)
+  r.start()
 }
 
 // --- Replay mode: load events.jsonl from a log directory ---
@@ -338,33 +340,23 @@ async function main() {
   const logDirIdx = args.indexOf('--log-dir')
   const logDir = logDirIdx >= 0 && logDirIdx + 1 < args.length ? args[logDirIdx + 1] : null
 
-  // If no specific mode, check for recent runs to replay
-  if (!isDemo && !hasRepo && !logDir) {
-    const recent = findRecentLogDirs()
-    const withEvents = recent.filter(d => fs.existsSync(path.join(d, 'events.jsonl')))
-
-    if (withEvents.length > 0) {
-      // Auto-replay the most recent run
-      await startTui()
-      events.log(`Found ${withEvents.length} recent run(s). Showing latest:`, 'info')
-      events.log(withEvents[0], 'info')
-      await replayLogDir(withEvents[0])
-      return
-    }
-
-    // No recent runs — fall through to demo
-    await startTui()
-    runDemo().catch(err => events.log(`Demo error: ${err}`, 'error'))
-    return
+  /** Load a run from a log directory — clears old state and replays */
+  function loadRun(dir: string) {
+    // Clear the event buffer so old run data doesn't persist
+    events.clearBuffer()
+    replayLogDir(dir)
   }
 
-  await startTui()
+  const r = await startTui()
 
-  if (logDir) {
-    await replayLogDir(logDir)
-  } else if (isDemo || !hasRepo) {
+  if (isDemo) {
+    renderApp(r, 'dashboard', loadRun)
     runDemo().catch(err => events.log(`Demo error: ${err}`, 'error'))
-  } else {
+  } else if (logDir) {
+    renderApp(r, 'dashboard', loadRun)
+    await replayLogDir(logDir)
+  } else if (hasRepo) {
+    renderApp(r, 'dashboard', loadRun)
     const { runEvalbuff } = await import('../run-evalbuff')
 
     const getArg = (name: string, defaultValue?: string): string => {
@@ -387,6 +379,9 @@ async function main() {
     runEvalbuff({ repoPath, n, parallelism, loops, initCommand, codingModel, docsModel, cachedFeatures }).catch(err => {
       events.log(`Run failed: ${err}`, 'error')
     })
+  } else {
+    // No specific run — start with run picker
+    renderApp(r, 'run_picker', loadRun)
   }
 }
 

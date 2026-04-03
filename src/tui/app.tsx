@@ -50,12 +50,25 @@ interface RunState {
 }
 
 type View =
+  | { type: 'run_picker' }
   | { type: 'dashboard' }
   | { type: 'feature'; featureId: string }
   | { type: 'round'; round: number }
   | { type: 'judging'; featureId: string; round: number }
   | { type: 'summary' }
   | { type: 'diff'; title: string; diff: string }
+
+export interface RunInfo {
+  dir: string
+  name: string
+  timestamp: string
+  repoPath: string
+  status: 'complete' | 'in_progress' | 'empty'
+  featuresCount: number
+  roundsCount: number
+  scoreProgression: number[]
+  totalCost: number
+}
 
 function initialState(): RunState {
   return {
@@ -261,7 +274,7 @@ function DashboardView({ state, cursor, onSelect }: {
           <span fg="#a6e3a1">{state.scoreProgression.length > 0 ? state.scoreProgression.map((s, i) => `R${i}:${s.toFixed(1)}`).join(' -> ') : '—'}</span>
           <span fg="#6c7086">{' '}${state.totalCost.toFixed(2)}</span>
         </text>
-        <text fg="#585b70">j/k=move  Enter=detail  s=summary  r=rounds  q=quit</text>
+        <text fg="#585b70">j/k=move  Enter=detail  s=summary  r=rounds  p=runs  q=quit</text>
       </box>
     </box>
   )
@@ -291,9 +304,14 @@ function FeatureDetailView({ featureId, state, logData, selectedRound, fileCurso
   const deletedCount = ops.filter(o => o.action === 'delete').length
   const modifiedCount = ops.filter(o => o.action === 'modify').length
 
-  // Parse carve diff into per-file diffs
   const carveDiff = feature?.diff || ''
   const hasScores = f && Object.keys(f.scores).length > 0
+
+  // Filter diff to selected file (or show full diff if no file selected)
+  const selectedFilePath = ops[fileCursor]?.path
+  const displayDiff = selectedFilePath && carveDiff
+    ? (extractFileDiff(carveDiff, selectedFilePath) || carveDiff)
+    : carveDiff
 
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor="#1e1e2e">
@@ -441,10 +459,10 @@ function FeatureDetailView({ featureId, state, logData, selectedRound, fileCurso
           </box>
         ) : (
           <box flexDirection="column" border={true} borderStyle="rounded" borderColor="#45475a"
-            title=" Feature Code (ground truth) " flexGrow={1}>
+            title={` ${selectedFilePath || 'Feature Code'} (ground truth) `} flexGrow={1}>
             <scrollbox scrollY={true} flexGrow={1}>
               <box flexDirection="column" paddingX={1}>
-                {carveDiff ? invertDiff(carveDiff).split('\n').slice(0, 300).map((line, i) => {
+                {displayDiff ? invertDiff(displayDiff).split('\n').slice(0, 300).map((line, i) => {
                   const fg = line.startsWith('+') ? '#a6e3a1'
                     : line.startsWith('-') ? '#f38ba8'
                     : line.startsWith('@@') ? '#89b4fa'
@@ -458,13 +476,17 @@ function FeatureDetailView({ featureId, state, logData, selectedRound, fileCurso
         )}
       </box>
 
-      {/* Bottom diff panel (agent diff when scored) */}
-      {featureRound?.diff && (
+      {/* Bottom diff panel (agent diff when scored, filtered to selected file) */}
+      {featureRound?.diff && (() => {
+        const agentDiff = selectedFilePath
+          ? (extractFileDiff(featureRound.diff, selectedFilePath) || featureRound.diff)
+          : featureRound.diff
+        return (
         <box border={true} borderStyle="rounded" borderColor="#45475a"
-          title={` Agent Diff (R${selectedRound}) `} height="25%" minHeight={5}>
+          title={` Agent Diff (R${selectedRound})${selectedFilePath ? ` ${selectedFilePath}` : ''} `} height="25%" minHeight={5}>
           <scrollbox scrollY={true} flexGrow={1}>
             <box flexDirection="column" paddingX={1}>
-              {featureRound.diff.split('\n').slice(0, 100).map((line, i) => {
+              {agentDiff.split('\n').slice(0, 100).map((line, i) => {
                 const fg = line.startsWith('+') ? '#a6e3a1'
                   : line.startsWith('-') ? '#f38ba8'
                   : line.startsWith('@@') ? '#89b4fa'
@@ -474,7 +496,8 @@ function FeatureDetailView({ featureId, state, logData, selectedRound, fileCurso
             </box>
           </scrollbox>
         </box>
-      )}
+        )
+      })()}
 
       <box paddingX={2} height={1}>
         <text fg="#585b70">Esc=back  j/k=files  Enter=full diff  Tab=round  q=quit</text>
@@ -722,6 +745,149 @@ function SummaryView({ state, logData, onBack }: {
 }
 
 // ============================================================
+// Run Picker View
+// ============================================================
+
+/** Scan for evalbuff run directories across temp locations */
+function scanRunDirs(): RunInfo[] {
+  const os = require('os')
+  const fs = require('fs')
+  const path = require('path')
+  const tmpDir = os.tmpdir()
+  const dirs: string[] = []
+
+  // Scan both os.tmpdir() and /tmp (they can differ on macOS)
+  for (const base of [tmpDir, '/tmp']) {
+    try {
+      for (const name of fs.readdirSync(base)) {
+        if (name.startsWith('evalbuff-run-')) {
+          const full = path.join(base, name)
+          try {
+            if (fs.statSync(full).isDirectory()) dirs.push(full)
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  // Deduplicate and sort newest first
+  const unique = [...new Set(dirs)].sort().reverse()
+
+  return unique.slice(0, 30).map(dir => {
+    const name = path.basename(dir)
+    // Extract timestamp from dir name: evalbuff-run-2026-04-03T05-31-50
+    const tsMatch = name.match(/(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})/)
+    const timestamp = tsMatch ? tsMatch[1].replace(/-/g, (m: string, i: number) => i > 9 ? ':' : m).replace('T', ' ') : name
+
+    const summaryPath = path.join(dir, 'summary.json')
+    const featuresPath = path.join(dir, 'features.json')
+    const eventsPath = path.join(dir, 'events.jsonl')
+
+    let repoPath = ''
+    let scoreProgression: number[] = []
+    let totalCost = 0
+    let featuresCount = 0
+    let roundsCount = 0
+    let status: RunInfo['status'] = 'empty'
+
+    // Try summary.json first (completed runs)
+    if (fs.existsSync(summaryPath)) {
+      try {
+        const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf-8'))
+        repoPath = summary.repoPath || ''
+        scoreProgression = summary.scoreProgression || []
+        totalCost = summary.totalCost || 0
+        featuresCount = summary.featuresCarved || 0
+        roundsCount = summary.rounds?.length || 0
+        status = 'complete'
+      } catch {}
+    } else {
+      // Try events.jsonl for repo path
+      if (fs.existsSync(eventsPath)) {
+        try {
+          const firstLine = fs.readFileSync(eventsPath, 'utf-8').split('\n')[0]
+          const ev = JSON.parse(firstLine)
+          if (ev.event?.repoPath) repoPath = ev.event.repoPath
+        } catch {}
+        status = 'in_progress'
+      }
+      // Count features
+      if (fs.existsSync(featuresPath)) {
+        try {
+          featuresCount = JSON.parse(fs.readFileSync(featuresPath, 'utf-8')).length
+        } catch {}
+      }
+      // Count rounds
+      for (let r = 0; r < 20; r++) {
+        if (fs.existsSync(path.join(dir, `round-${r}`))) roundsCount++
+        else break
+      }
+    }
+
+    // Skip empty directories with no data at all
+    const hasAnyData = fs.existsSync(eventsPath) || fs.existsSync(summaryPath) || fs.existsSync(featuresPath)
+    if (!hasAnyData) status = 'empty'
+
+    return { dir, name, timestamp, repoPath, status, featuresCount, roundsCount, scoreProgression, totalCost }
+  }).filter(r => r.status !== 'empty')
+}
+
+function RunPickerView({ runs, cursor, onSelect }: {
+  runs: RunInfo[]
+  cursor: number
+  onSelect: (dir: string) => void
+}) {
+
+  return (
+    <box flexDirection="column" width="100%" height="100%" backgroundColor="#1e1e2e">
+      <box paddingX={1} height={1}>
+        <text>
+          <span fg="#89b4fa" attributes={1}>EVALBUFF</span>
+          <span fg="#6c7086">{' '}Select a run ({runs.length} found)</span>
+        </text>
+      </box>
+
+      <box flexDirection="column" border={true} borderStyle="rounded" borderColor="#45475a"
+        title=" Past Runs " flexGrow={1}>
+        <scrollbox scrollY={true} flexGrow={1}>
+          <box flexDirection="column" paddingX={1}>
+            {runs.map((run, idx) => {
+              const sel = idx === cursor
+              const repoName = run.repoPath.split('/').pop() || ''
+              const statusIcon = run.status === 'complete' ? '●' : '◐'
+              const statusColor = run.status === 'complete' ? '#a6e3a1' : '#f9e2af'
+              const scores = run.scoreProgression.length > 0
+                ? run.scoreProgression.map(s => s.toFixed(1)).join(' -> ')
+                : ''
+
+              return (
+                <box key={run.dir} height={1} backgroundColor={sel ? '#313244' : undefined}>
+                  <text>
+                    <span fg={sel ? '#cdd6f4' : '#585b70'}>{sel ? '> ' : '  '}</span>
+                    <span fg={statusColor}>{statusIcon} </span>
+                    <span fg="#cdd6f4">{run.timestamp}</span>
+                    <span fg="#6c7086">{' '}{repoName}</span>
+                    <span fg="#585b70">{run.featuresCount > 0 ? ` ${run.featuresCount}f` : ''}</span>
+                    <span fg="#585b70">{run.roundsCount > 0 ? ` ${run.roundsCount}r` : ''}</span>
+                    <span fg="#a6e3a1">{scores ? `  ${scores}` : ''}</span>
+                    <span fg="#f9e2af">{run.totalCost > 0 ? `  $${run.totalCost.toFixed(2)}` : ''}</span>
+                  </text>
+                </box>
+              )
+            })}
+            {runs.length === 0 && <text fg="#6c7086">No past runs found.</text>}
+          </box>
+        </scrollbox>
+      </box>
+
+      <box paddingX={2} height={1}>
+        <text fg="#585b70">j/k=move  Enter=open  q=quit</text>
+      </box>
+    </box>
+  )
+}
+
+// ============================================================
 // Full-screen Diff View
 // ============================================================
 
@@ -762,15 +928,24 @@ function DiffView({ title, diff }: { title: string; diff: string }) {
 // Main App — view router + event handler + keyboard nav
 // ============================================================
 
-export function App() {
+export function App({ startView, onLoadRun }: { startView?: View['type']; onLoadRun?: (dir: string) => void }) {
+  const _onLoadRun = onLoadRun || ((_dir: string) => {})
   const [state, setState] = useState<RunState>(initialState)
-  const [view, setView] = useState<View>({ type: 'dashboard' })
+  const [view, setView] = useState<View>({ type: startView || 'dashboard' } as View)
   const [prevView, setPrevView] = useState<View | null>(null)
   const [cursor, setCursor] = useState(0)
   const [fileCursor, setFileCursor] = useState(0)
   const [selectedRound, setSelectedRound] = useState(0)
   const [logData, setLogData] = useState<LogDirData | null>(null)
+  const [pickerRuns, setPickerRuns] = useState<RunInfo[]>([])
   const { width, height } = useTerminalDimensions()
+
+  // Load picker runs on mount if starting in picker
+  useEffect(() => {
+    if (startView === 'run_picker') {
+      setPickerRuns(scanRunDirs())
+    }
+  }, [])
 
   // Timer for elapsed display
   useEffect(() => {
@@ -916,7 +1091,25 @@ export function App() {
         setPrevView(null)
       } else if (view.type === 'judging') {
         setView({ type: 'feature', featureId: view.featureId })
+      } else if (view.type === 'run_picker') {
+        // If we have a run loaded, go to dashboard; otherwise stay
+        if (state.repoPath) setView({ type: 'dashboard' })
       } else if (view.type !== 'dashboard') {
+        setView({ type: 'dashboard' })
+        setCursor(0)
+      }
+      return
+    }
+
+    // Run picker navigation
+    if (view.type === 'run_picker') {
+      const maxIdx = pickerRuns.length - 1
+      if ((key.name === 'j' || key.name === 'down') && cursor < maxIdx) {
+        setCursor(c => Math.min(c + 1, maxIdx))
+      } else if ((key.name === 'k' || key.name === 'up') && cursor > 0) {
+        setCursor(c => Math.max(c - 1, 0))
+      } else if (key.name === 'return' && pickerRuns[cursor]) {
+        _onLoadRun(pickerRuns[cursor].dir)
         setView({ type: 'dashboard' })
         setCursor(0)
       }
@@ -938,6 +1131,10 @@ export function App() {
         setView({ type: 'summary' })
       } else if (key.name === 'r') {
         setView({ type: 'round', round: 0 })
+        setCursor(0)
+      } else if (key.name === 'p') {
+        setPickerRuns(scanRunDirs())
+        setView({ type: 'run_picker' })
         setCursor(0)
       }
     } else if (view.type === 'feature') {
@@ -1001,6 +1198,14 @@ export function App() {
 
   // Render active view
   switch (view.type) {
+    case 'run_picker':
+      return (
+        <RunPickerView
+          runs={pickerRuns}
+          cursor={cursor}
+          onSelect={(dir) => { _onLoadRun(dir); setView({ type: 'dashboard' }); setCursor(0) }}
+        />
+      )
     case 'dashboard':
       return (
         <DashboardView
