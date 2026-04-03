@@ -52,31 +52,126 @@ async function startTui() {
 
 // --- Replay mode: load events.jsonl from a log directory ---
 
+/** Synthesize events from filesystem data (summary.json, round dirs) to fill gaps.
+ *  Marks what it synthesized in seenEventTypes so it won't duplicate on re-call. */
+function augmentFromFilesystem(logDir: string, seenEventTypes: Set<string>) {
+  const hasRunStart = seenEventTypes.has('run_start')
+  const hasFeatures = seenEventTypes.has('feature_planned')
+  const hasScores = seenEventTypes.has('round_complete')
+  const hasComplete = seenEventTypes.has('run_complete')
+
+  const summaryPath = path.join(logDir, 'summary.json')
+  const summary = fs.existsSync(summaryPath) ? JSON.parse(fs.readFileSync(summaryPath, 'utf-8')) : null
+
+  if (!hasRunStart) {
+    seenEventTypes.add('run_start')
+    events.send({
+      type: 'run_start',
+      repoPath: summary?.repoPath || logDir,
+      n: summary?.featuresCarved || 0,
+      loops: (summary?.rounds?.length ?? 1) - 1,
+      parallelism: 0, codingModel: '?', docsModel: '?', logDir,
+    })
+  }
+
+  // Try features.json for feature IDs (written before any round completes)
+  if (!hasFeatures) {
+    const featuresPath = path.join(logDir, 'features.json')
+    if (fs.existsSync(featuresPath)) {
+      try {
+        const features = JSON.parse(fs.readFileSync(featuresPath, 'utf-8')) as Array<{ id: string }>
+        if (features.length > 0) {
+          seenEventTypes.add('feature_planned')
+          events.send({ type: 'feature_planned', totalCandidates: features.length, selectedIds: features.map(f => f.id) })
+          for (const f of features) {
+            events.send({ type: 'feature_status', featureId: f.id, status: 'carved' })
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // Always try to synthesize feature/score data from summary if missing
+  if (summary && (!hasFeatures || !hasScores)) {
+    const allIds = new Set<string>()
+    for (const round of summary.rounds || []) {
+      for (const id of Object.keys(round.scores || {})) allIds.add(id)
+    }
+
+    if (!hasFeatures && allIds.size > 0) {
+      seenEventTypes.add('feature_planned')
+      events.send({ type: 'feature_planned', totalCandidates: allIds.size, selectedIds: [...allIds] })
+    }
+
+    if (!hasScores) {
+      seenEventTypes.add('round_complete')
+      for (const round of summary.rounds || []) {
+        events.send({ type: 'phase_change', phase: 'evaluating', round: round.round, loop: round.round })
+        for (const [id, score] of Object.entries(round.scores || {})) {
+          events.send({ type: 'feature_status', featureId: id, status: 'scored', score: score as number })
+        }
+        events.send({ type: 'round_complete', round: round.round, avgScore: round.avgScore, totalCost: round.totalCost, scores: round.scores })
+      }
+    }
+
+    if (!hasComplete && summary.scoreProgression) {
+      seenEventTypes.add('run_complete')
+      events.send({ type: 'run_complete', scoreProgression: summary.scoreProgression, totalCost: summary.totalCost, duration: '' })
+    }
+  }
+
+  // Even without summary.json, try round directories
+  if (!summary && !hasScores) {
+    for (let r = 0; r < 20; r++) {
+      const roundSummaryPath = path.join(logDir, `round-${r}`, 'summary.json')
+      if (!fs.existsSync(roundSummaryPath)) break
+      try {
+        const rs = JSON.parse(fs.readFileSync(roundSummaryPath, 'utf-8'))
+        events.send({ type: 'phase_change', phase: 'evaluating', round: r, loop: r })
+        // Get feature IDs from the round directory
+        const roundDir = path.join(logDir, `round-${r}`)
+        const featureIds = fs.readdirSync(roundDir, { withFileTypes: true })
+          .filter(e => e.isDirectory()).map(e => e.name)
+        if (r === 0 && !hasFeatures) {
+          events.send({ type: 'feature_planned', totalCandidates: featureIds.length, selectedIds: featureIds })
+        }
+        for (const id of featureIds) {
+          const scorePath = path.join(roundDir, id, 'score.txt')
+          const score = fs.existsSync(scorePath) ? parseFloat(fs.readFileSync(scorePath, 'utf-8')) : -1
+          events.send({ type: 'feature_status', featureId: id, status: 'scored', score })
+        }
+        events.send({ type: 'round_complete', round: r, avgScore: rs.avgScore || 0, totalCost: rs.totalCost || 0, scores: Object.fromEntries(rs.tasks?.map((t: any) => [t.featureId, t.score]) || []) })
+      } catch {}
+    }
+  }
+}
+
 async function replayLogDir(logDir: string) {
   const eventsPath = path.join(logDir, 'events.jsonl')
+  const seenEventTypes = new Set<string>()
 
-  if (!fs.existsSync(eventsPath)) {
-    events.log(`No events.jsonl found in ${logDir}`, 'error')
-    events.log('This log directory may be from before TUI support was added.', 'info')
-    return
+  // Step 1: Replay events.jsonl if it exists
+  if (fs.existsSync(eventsPath)) {
+    const content = fs.readFileSync(eventsPath, 'utf-8')
+    const lines = content.trim().split('\n').filter(Boolean)
+    for (const line of lines) {
+      try {
+        const stamped: TimestampedEvent = JSON.parse(line)
+        seenEventTypes.add(stamped.event.type)
+        events.send(stamped.event)
+      } catch {}
+    }
+    events.log(`Replayed ${lines.length} events from log`, 'info')
   }
 
-  // Replay existing events instantly
-  const content = fs.readFileSync(eventsPath, 'utf-8')
-  const lines = content.trim().split('\n').filter(Boolean)
-  for (const line of lines) {
-    try {
-      const stamped: TimestampedEvent = JSON.parse(line)
-      events.send(stamped.event)
-    } catch {}
-  }
+  // Step 2: Fill gaps from filesystem data
+  augmentFromFilesystem(logDir, seenEventTypes)
 
-  events.log(`Replayed ${lines.length} events from ${logDir}`, 'info')
-
-  // If the run isn't complete, watch for new events (tail -f style)
-  const lastEvent = lines.length > 0 ? JSON.parse(lines[lines.length - 1]) : null
-  if (!lastEvent || lastEvent.event.type !== 'run_complete') {
-    events.log('Run still in progress — watching for new events...', 'info')
+  // Step 3: If still in progress, watch for new events
+  const isComplete = seenEventTypes.has('run_complete') || fs.existsSync(path.join(logDir, 'summary.json'))
+  if (!isComplete && fs.existsSync(eventsPath)) {
+    events.log('Run in progress — watching for new events...', 'info')
+    const content = fs.readFileSync(eventsPath, 'utf-8')
     let offset = content.length
 
     const watcher = fs.watch(eventsPath, () => {
@@ -93,7 +188,12 @@ async function replayLogDir(logDir: string) {
       }
     })
 
-    process.on('exit', () => watcher.close())
+    // Also periodically re-scan filesystem for new data files (features.json, round dirs)
+    const fsPoller = setInterval(() => {
+      augmentFromFilesystem(logDir, seenEventTypes)
+    }, 3000)
+
+    process.on('exit', () => { watcher.close(); clearInterval(fsPoller) })
   }
 }
 
@@ -282,8 +382,9 @@ async function main() {
     const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
     const codingModel = getArg('coding-model', 'sonnet')
     const docsModel = getArg('docs-model', 'opus')
+    const cachedFeatures = hasArg('cached-features') ? getArg('cached-features') : undefined
 
-    runEvalbuff({ repoPath, n, parallelism, loops, initCommand, codingModel, docsModel }).catch(err => {
+    runEvalbuff({ repoPath, n, parallelism, loops, initCommand, codingModel, docsModel, cachedFeatures }).catch(err => {
       events.log(`Run failed: ${err}`, 'error')
     })
   }
