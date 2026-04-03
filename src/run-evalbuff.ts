@@ -37,6 +37,7 @@ export interface EvalbuffOptions {
   initCommand?: string
   codingModel: string  // model for coding agents (default: sonnet)
   docsModel: string    // model for docs agents (default: opus)
+  cachedFeatures?: string  // path to a features.json from a previous run
 }
 
 // --- Eval round ---
@@ -149,66 +150,78 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
 
   console.log(`\nEvalbuff Run`)
   console.log(`  Repo: ${opts.repoPath}`)
-  console.log(`  Features to carve: ${opts.n}`)
   console.log(`  Improvement loops: ${opts.loops}`)
   console.log(`  Coding model: ${opts.codingModel}`)
   console.log(`  Docs model: ${opts.docsModel}`)
   console.log(`  Log dir: ${logDir}`)
 
-  // --- Step 1: Plan features ---
-  events.send({ type: 'phase_change', phase: 'planning', detail: 'Analyzing codebase...' })
-  console.log(`\n${'='.repeat(60)}`)
-  console.log('STEP 1: Planning features to carve...')
-  console.log(`${'='.repeat(60)}`)
+  let features: CarvedFeature[]
 
-  const plan = await planFeatures(opts.repoPath)
-  console.log(`\nIdentified ${plan.candidates.length} candidates. Reasoning:\n${plan.reasoning.slice(0, 500)}`)
+  if (opts.cachedFeatures) {
+    // --- Load cached features ---
+    console.log(`\nLoading cached features from ${opts.cachedFeatures}`)
+    const cached: CarvedFeature[] = JSON.parse(fs.readFileSync(opts.cachedFeatures, 'utf-8'))
+    features = selectRandom(cached, opts.n)
+    console.log(`  Loaded ${cached.length} features, selected ${features.length}: ${features.map(f => f.id).join(', ')}`)
 
-  fs.writeFileSync(path.join(logDir, 'plan.json'), JSON.stringify(plan, null, 2))
+    events.send({ type: 'feature_planned', totalCandidates: cached.length, selectedIds: features.map(f => f.id) })
+    fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
+  } else {
+    // --- Step 1: Plan features ---
+    console.log(`  Features to carve: ${opts.n}`)
+    events.send({ type: 'phase_change', phase: 'planning', detail: 'Analyzing codebase...' })
+    console.log(`\n${'='.repeat(60)}`)
+    console.log('STEP 1: Planning features to carve...')
+    console.log(`${'='.repeat(60)}`)
 
-  // --- Step 2: Select random subset and carve ---
-  console.log(`\n${'='.repeat(60)}`)
-  console.log(`STEP 2: Selecting ${opts.n} random features and carving...`)
-  console.log(`${'='.repeat(60)}`)
+    const plan = await planFeatures(opts.repoPath)
+    console.log(`\nIdentified ${plan.candidates.length} candidates. Reasoning:\n${plan.reasoning.slice(0, 500)}`)
 
-  const selected = selectRandom(plan.candidates, opts.n)
-  console.log(`Selected: ${selected.map((c) => c.id).join(', ')}`)
+    fs.writeFileSync(path.join(logDir, 'plan.json'), JSON.stringify(plan, null, 2))
 
-  events.send({ type: 'feature_planned', totalCandidates: plan.candidates.length, selectedIds: selected.map(c => c.id) })
-  events.send({ type: 'phase_change', phase: 'carving', detail: `Carving ${selected.length} features...` })
+    // --- Step 2: Select random subset and carve ---
+    console.log(`\n${'='.repeat(60)}`)
+    console.log(`STEP 2: Selecting ${opts.n} random features and carving...`)
+    console.log(`${'='.repeat(60)}`)
 
-  const features: CarvedFeature[] = []
-  {
-    // Carve features in parallel with bounded concurrency
-    const carveQueue = [...selected]
-    let carveNext = 0
-    const carveResults: (CarvedFeature | null)[] = new Array(carveQueue.length).fill(null)
+    const selected = selectRandom(plan.candidates, opts.n)
+    console.log(`Selected: ${selected.map((c) => c.id).join(', ')}`)
 
-    async function carveWorker(): Promise<void> {
-      while (carveNext < carveQueue.length) {
-        const idx = carveNext++
-        const candidate = carveQueue[idx]
-        try {
-          events.send({ type: 'feature_status', featureId: candidate.id, status: 'carving' })
-          const carved = await carveFeature(opts.repoPath, candidate)
-          if (carved) {
-            carveResults[idx] = carved
-            events.send({ type: 'feature_status', featureId: candidate.id, status: 'carved', detail: `${carved.operations.length} file operations` })
-            console.log(`  Carved: ${carved.id} — ${carved.operations.length} file operations`)
+    events.send({ type: 'feature_planned', totalCandidates: plan.candidates.length, selectedIds: selected.map(c => c.id) })
+    events.send({ type: 'phase_change', phase: 'carving', detail: `Carving ${selected.length} features...` })
+
+    features = []
+    {
+      const carveQueue = [...selected]
+      let carveNext = 0
+      const carveResults: (CarvedFeature | null)[] = new Array(carveQueue.length).fill(null)
+
+      async function carveWorker(): Promise<void> {
+        while (carveNext < carveQueue.length) {
+          const idx = carveNext++
+          const candidate = carveQueue[idx]
+          try {
+            events.send({ type: 'feature_status', featureId: candidate.id, status: 'carving' })
+            const carved = await carveFeature(opts.repoPath, candidate)
+            if (carved) {
+              carveResults[idx] = carved
+              events.send({ type: 'feature_status', featureId: candidate.id, status: 'carved', detail: `${carved.operations.length} file operations` })
+              console.log(`  Carved: ${carved.id} — ${carved.operations.length} file operations`)
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error)
+            events.send({ type: 'feature_status', featureId: candidate.id, status: 'carve_failed', detail: msg.slice(0, 200) })
+            console.error(`  Failed to carve ${candidate.id}: ${msg.slice(0, 200)}`)
           }
-        } catch (error) {
-          const msg = error instanceof Error ? error.message : String(error)
-          events.send({ type: 'feature_status', featureId: candidate.id, status: 'carve_failed', detail: msg.slice(0, 200) })
-          console.error(`  Failed to carve ${candidate.id}: ${msg.slice(0, 200)}`)
         }
       }
-    }
 
-    await Promise.all(
-      Array.from({ length: Math.min(opts.parallelism, carveQueue.length) }, () => carveWorker()),
-    )
-    for (const result of carveResults) {
-      if (result) features.push(result)
+      await Promise.all(
+        Array.from({ length: Math.min(opts.parallelism, carveQueue.length) }, () => carveWorker()),
+      )
+      for (const result of carveResults) {
+        if (result) features.push(result)
+      }
     }
   }
 
@@ -340,6 +353,7 @@ if (import.meta.main) {
   const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
   const codingModel = getArg('coding-model', 'sonnet')
   const docsModel = getArg('docs-model', 'opus')
+  const cachedFeatures = hasArg('cached-features') ? getArg('cached-features') : undefined
 
   runEvalbuff({
     repoPath,
@@ -349,6 +363,7 @@ if (import.meta.main) {
     initCommand,
     codingModel,
     docsModel,
+    cachedFeatures,
   }).catch((error) => {
     console.error('Evalbuff run failed:', error)
     process.exit(1)
