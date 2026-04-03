@@ -21,6 +21,7 @@ import { collectDocSuggestions, runDocsRefactorAgent } from './docs-refactor'
 import { selectRandom, getGroundTruthDiff, getDocsSnapshot, computeDocsDiffText } from './eval-helpers'
 import { runAgentOnCarve } from './eval-runner'
 import { saveRoundResults, saveSummary } from './report'
+import { events } from './tui/events'
 
 import type { CarvedFeature } from './carve-features'
 import type { TaskResult } from './eval-runner'
@@ -59,6 +60,7 @@ async function runEvalRound(
     while (next < queue.length) {
       const { feature, i } = queue[next++]
       try {
+        events.send({ type: 'feature_status', featureId: feature.id, status: 'agent_running' })
         const result = await runAgentOnCarve({
           idx: i,
           total: features.length,
@@ -70,6 +72,7 @@ async function runEvalRound(
           docsSourcePath: opts.repoPath,
         })
         results[i] = result
+        events.send({ type: 'feature_status', featureId: feature.id, status: 'scored', score: result.score, cost: result.costEstimate })
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
         results[i] = {
@@ -91,6 +94,7 @@ async function runEvalRound(
           costEstimate: 0,
           docsRead: [],
         }
+        events.send({ type: 'feature_status', featureId: feature.id, status: 'eval_failed', detail: msg.slice(0, 200) })
       }
     }
   }
@@ -113,6 +117,14 @@ async function runEvalRound(
   console.log(`  Average: ${avgScore.toFixed(1)}/10 (${valid.length}/${results.length} succeeded)`)
   console.log(`  Cost: $${totalCost.toFixed(2)}`)
 
+  events.send({
+    type: 'round_complete',
+    round,
+    avgScore,
+    totalCost,
+    scores: Object.fromEntries(results.map(r => [r.featureId, r.score])),
+  })
+
   return { round, tasks: results, avgScore, totalCost }
 }
 
@@ -123,6 +135,18 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const logDir = path.join(os.tmpdir(), `evalbuff-run-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
   fs.mkdirSync(logDir, { recursive: true })
 
+  events.initLog(logDir)
+  events.send({
+    type: 'run_start',
+    repoPath: opts.repoPath,
+    n: opts.n,
+    loops: opts.loops,
+    parallelism: opts.parallelism,
+    codingModel: opts.codingModel,
+    docsModel: opts.docsModel,
+    logDir,
+  })
+
   console.log(`\nEvalbuff Run`)
   console.log(`  Repo: ${opts.repoPath}`)
   console.log(`  Features to carve: ${opts.n}`)
@@ -132,6 +156,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   console.log(`  Log dir: ${logDir}`)
 
   // --- Step 1: Plan features ---
+  events.send({ type: 'phase_change', phase: 'planning', detail: 'Analyzing codebase...' })
   console.log(`\n${'='.repeat(60)}`)
   console.log('STEP 1: Planning features to carve...')
   console.log(`${'='.repeat(60)}`)
@@ -149,6 +174,9 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const selected = selectRandom(plan.candidates, opts.n)
   console.log(`Selected: ${selected.map((c) => c.id).join(', ')}`)
 
+  events.send({ type: 'feature_planned', totalCandidates: plan.candidates.length, selectedIds: selected.map(c => c.id) })
+  events.send({ type: 'phase_change', phase: 'carving', detail: `Carving ${selected.length} features...` })
+
   const features: CarvedFeature[] = []
   {
     // Carve features in parallel with bounded concurrency
@@ -161,13 +189,16 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
         const idx = carveNext++
         const candidate = carveQueue[idx]
         try {
+          events.send({ type: 'feature_status', featureId: candidate.id, status: 'carving' })
           const carved = await carveFeature(opts.repoPath, candidate)
           if (carved) {
             carveResults[idx] = carved
+            events.send({ type: 'feature_status', featureId: candidate.id, status: 'carved', detail: `${carved.operations.length} file operations` })
             console.log(`  Carved: ${carved.id} — ${carved.operations.length} file operations`)
           }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
+          events.send({ type: 'feature_status', featureId: candidate.id, status: 'carve_failed', detail: msg.slice(0, 200) })
           console.error(`  Failed to carve ${candidate.id}: ${msg.slice(0, 200)}`)
         }
       }
@@ -195,6 +226,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
 
   // --- Step 3: Baseline evaluation ---
+  events.send({ type: 'phase_change', phase: 'evaluating', round: 0, detail: 'Baseline' })
   console.log(`\n${'='.repeat(60)}`)
   console.log('STEP 3: Baseline evaluation')
   console.log(`${'='.repeat(60)}`)
@@ -216,12 +248,16 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     const validTasks = previousResults.tasks.filter((t) => t.score >= 0)
     const judgeSuggestions = collectDocSuggestions(validTasks)
 
+    events.send({ type: 'phase_change', phase: 'docs_refactor', loop })
+    events.send({ type: 'docs_refactor', action: 'start', loop, suggestionCount: judgeSuggestions.split('\n').filter(l => l.startsWith('-')).length })
+
     console.log(`\n--- Step 4a: Docs refactor with judge suggestions ---`)
     const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
 
     fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${loop}.txt`), judgeSuggestions)
 
     await runDocsRefactorAgent(opts.repoPath, judgeSuggestions, opts.docsModel)
+    events.send({ type: 'docs_refactor', action: 'complete', loop })
 
     // Save docs state and diff for this loop
     const docsAfterRefactor = getDocsSnapshot(opts.repoPath)
@@ -233,6 +269,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     )
 
     // 4b: Re-eval with updated docs
+    events.send({ type: 'phase_change', phase: 'evaluating', round: loop, loop, detail: 'Re-eval with updated docs' })
     console.log(`\n--- Step 4b: Re-evaluation with updated docs ---`)
     const results = await runEvalRound(features, groundTruthDiffs, opts, loop)
     saveRoundResults(logDir, results)
@@ -263,6 +300,14 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   }
 
   saveSummary(logDir, summary, roundResults, opts)
+
+  events.send({
+    type: 'run_complete',
+    scoreProgression: summary.scoreProgression,
+    totalCost,
+    duration: `${startTime} → ${endTime}`,
+  })
+  events.close()
 
   console.log(`\n${'='.repeat(60)}`)
   console.log('EVALBUFF RUN COMPLETE')

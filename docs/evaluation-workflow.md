@@ -212,14 +212,53 @@ Failed tasks render `### featureId — FAILED` with a quoted failure summary; no
 round-<n>/
   summary.json
   <featureId>/
-    trace.txt           # Raw JSONL trace (compressed in background)
-    diff.txt            # Agent's diff
-    judging.json        # Full JudgingResult
-    score.txt           # Numeric score
+    trace.txt              # Canonical raw trace — NEVER overwritten
+    trace.txt.compressed   # Sidecar refs inline (derived, additive)
+    trace.txt.sidecars/    # Directory of extracted blocks
+      manifest.json        # Index of all sidecars
+      sidecar_<id>.json    # or .txt — individual extracted blocks
+    diff.txt               # Agent's diff
+    judging.json           # Full JudgingResult
+    score.txt              # Numeric score
 judge-suggestions-loop-<n>.txt
 docs-diff-loop-<n>.txt
 docs-state-loop-<n>.json
 ```
+
+### Additive Artifact Pattern
+
+When any pipeline step produces derived artifacts from a raw artifact, the raw artifact must remain **byte-for-byte identical** to its original content. Derived artifacts use sibling naming conventions:
+
+- `<source>.<suffix>` for the processed version (e.g., `trace.txt.compressed`)
+- `<source>.<suffix>/` for a directory of supporting files (e.g., `trace.txt.sidecars/`)
+
+**Rules**:
+1. Write the raw artifact first, then derive
+2. Never overwrite the source file with processed output
+3. Never write derived metadata (e.g., `manifest.json`) next to the raw file — it goes inside the derived directory
+4. Never use a generic per-task directory name (e.g., `sidecars/`) — use `<source>.sidecars/`
+
+### `saveRoundResults()` Integration Wiring
+
+The exact integration pattern in `src/report.ts` is:
+
+```ts
+const tracePath = path.join(taskDir, 'trace.txt')
+fs.writeFileSync(tracePath, task.trace)                       // 1. Write raw artifact
+compressAndSave(tracePath, task.trace).catch((err) => {       // 2. Derive in background
+  console.warn(`Failed to compress trace for ${task.featureId}: ${err}`)
+})
+```
+
+Key points:
+- `compressAndSave()` is fire-and-forget (`.catch()` only logs)
+- The raw `trace.txt` is never touched again after the initial write
+- Derived artifacts appear as `trace.txt.compressed` and `trace.txt.sidecars/manifest.json`
+
+**Verification recipe**: Construct a synthetic `RoundResult` with a trace payload exceeding 2048 bytes (the default threshold), call `saveRoundResults()`, wait briefly for background compression, then assert:
+1. `trace.txt` is byte-for-byte equal to `task.trace`
+2. `trace.txt.compressed` exists
+3. `trace.txt.sidecars/manifest.json` exists
 
 ## TaskResult
 

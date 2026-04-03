@@ -11,10 +11,12 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/react",
     "types": ["bun", "node"],
     "baseUrl": ".",
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": ["node_modules"]
 }

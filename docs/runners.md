@@ -74,40 +74,21 @@ Every runner must:
 
 1. Return `RunnerResult` with normalized steps, cost, and diff
 2. Normalize provider events into `PrintModeEvent` format
-3. Diff against the correct base commit (see Diff Capture below)
-4. Avoid mutating the repo index just to capture a diff
+3. Capture a post-run repo diff without staging or committing solely for diff collection
 
-## Diff Capture Rules
+## Diff Capture
 
-Before the agent runs, record the base SHA:
-
-```ts
-const baseSha = execSync('git rev-parse HEAD', {
-  cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore']
-}).trim()
-```
-
-After the run, capture changes using `captureGitDiff()` from `src/eval-helpers.ts`:
+The current runner implementations collect the diff after the run with:
 
 ```ts
-diff = captureGitDiff(this.cwd, { baseRef: baseSha })
+execSync('git diff --binary HEAD', { cwd, encoding: 'utf-8' })
 ```
 
-**Do not:**
-- Call `git add .` or `git add -A` inside runners — it mutates the repo index
-- Diff against the final `HEAD` — agents may create commits during a run, making `git diff HEAD` empty
-
-The diff must include:
-- Tracked edits (modified files)
-- Staged edits
-- Committed edits since the base SHA
-- Untracked files (new files created by the agent)
-
-`captureGitDiff()` handles all of these without staging.
+This snapshots tracked working-tree and staged changes relative to the current `HEAD`. Do not mutate the repo index just to make diff collection work.
 
 ## Provider Normalization
 
-Every runner must rewrite provider-native tool names into the canonical step names before pushing to `steps`. Downstream code (especially `extractDocsRead()`) only recognizes these names:
+Every runner must rewrite provider-native tool names into the canonical step names before pushing to `steps`.
 
 | Canonical Name | Meaning |
 |---|---|
@@ -133,9 +114,7 @@ Every runner must rewrite provider-native tool names into the canonical step nam
 
 Codebuff-native tools (`run_terminal_command`, `read_files`, `read_docs`, `read_subtree`, `str_replace`, `write_file`, `apply_patch`, `propose_str_replace`, `propose_write_file`) must be mapped to the canonical names. Internal housekeeping events like `set_messages` must be filtered out.
 
-**Input shape normalization**: For providers whose read tools emit arrays or provider-specific fields, normalization must rewrite both the tool name and the input shape into the shared format consumed by `extractDocsRead()` and other trace readers. For example, if a provider emits `input.paths: string[]` (an array of paths), the runner must either emit one canonical `tool_call` per path using `input.path` (e.g., `{ type: 'tool_call', toolName: 'Read', input: { path: 'docs/guide.md' } }`) or update `extractDocsRead()` in the same diff to understand the array form. A tool-name rename alone is incomplete.
-
-If a new tool name is introduced by a provider, update `extractDocsRead()` in `src/eval-helpers.ts` and any trace consumers.
+**Input shape normalization**: For providers whose read tools emit arrays or provider-specific fields, normalization must rewrite both the tool name and the input shape into the shared format consumed by downstream trace readers. A tool-name rename alone is incomplete.
 
 ### Compound Events (MCP, Multi-Step Tools)
 
@@ -153,7 +132,7 @@ This ensures trace consumers can reconstruct the full interaction.
 
 When a provider returns a completed session whose `output.type === 'error'` or throws during `run()`:
 
-- If the session produced steps, cost, or file edits, the runner must still capture `diff` with `captureGitDiff()`, compute `totalCostUsd`, and persist a structured debug dump (JSON containing `prompt`, `steps`, and serialized `error` fields)
+- If the session produced steps, cost, or file edits, the runner must still capture `diff`, compute `totalCostUsd`, and persist a structured debug dump (JSON containing `prompt`, `steps`, and serialized `error` fields)
 - After capturing partial work, the runner must **reject** (throw) so `runAgentOnCarve()` can convert it to a `score = -1` infrastructure failure result
 - Do not silently return a partial `RunnerResult` without indicating failure — the caller must know the run did not complete normally
 - In `src/eval-runner.ts`, `createInfrastructureFailureResult()` writes `score = -1`, `judging.overallScore = -1`, empty `diff`, and plain-text `trace` beginning with `Agent error:`. Tests that inspect `round-<n>/<featureId>/` must branch on score: for `score >= 0`, JSON-parse trace lines; for `score < 0`, assert non-empty plain text trace plus matching `-1` score fields
