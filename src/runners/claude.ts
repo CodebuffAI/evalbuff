@@ -43,6 +43,7 @@ export class ClaudeRunner implements Runner {
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         persistSession: false,
+        settingSources: ['project'],
         env: {
           ...process.env as Record<string, string>,
           ...this.env,
