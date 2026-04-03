@@ -8,9 +8,7 @@ Evalbuff improves a coding agent's performance by running it for practice to re-
 
 Start your response by reading whichever `docs/` files are relevant to your task based on the descriptions below:
 
-- `docs/evaluation-workflow.md` — **Read when**: working on the eval pipeline, carving, judging, docs refactor, report generation, or the run-evalbuff orchestrator. Covers the full pipeline: plan → carve → eval → judge → docs refactor → repeat. Also covers git/docs helpers in `src/eval-helpers.ts`.
-- `docs/runners.md` — **Read when**: adding/modifying a runner, changing how agents are invoked, or working on diff capture. Covers the runner adapter contract, registration, tool normalization, and diff capture.
-- `docs/testing.md` — **Read when**: writing or modifying tests, adding test scripts, or verifying test conventions. Covers the test framework, scripts, patterns, contract-first development, and pre-submit verification.
+- `docs/example.md` — **Read when**: You need to see an example doc in order to add more real docs. (Feel free to replace this.)
 
 When in doubt about whether a doc is relevant, **read it anyway** — it takes seconds and prevents hours of rework.
 
