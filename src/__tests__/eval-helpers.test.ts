@@ -73,7 +73,7 @@ describe('extractDocsRead', () => {
 })
 
 describe('getGroundTruthDiff', () => {
-  it('prefers the actual carve diff over reconstructing from partial original files', () => {
+  it('returns flipped rebuild diff from computeGroundTruthDiff when operations are available', () => {
     const feature: CarvedFeature = {
       id: 'feature-x',
       prompt: 'Restore feature x',
@@ -81,6 +81,7 @@ describe('getGroundTruthDiff', () => {
       complexity: 'medium',
       originalFiles: {
         'src/feature.ts': 'export const feature = true\n',
+        'src/index.ts': "console.log('with feature')\n",
       },
       operations: [
         { path: 'src/feature.ts', action: 'delete' },
@@ -91,15 +92,35 @@ describe('getGroundTruthDiff', () => {
         'deleted file mode 100644',
         'diff --git a/src/index.ts b/src/index.ts',
         "@@ -1 +1 @@",
-        "-console.log('without feature')",
-        "+console.log('with feature')",
+        "-console.log('with feature')",
+        "+console.log('without feature')",
       ].join('\n'),
     }
 
     const diff = getGroundTruthDiff(feature)
 
+    // Should be the rebuild (flipped) diff, not the raw carve diff
+    expect(diff).not.toBe(feature.diff)
+    expect(diff).toContain('+export const feature = true')
+    expect(diff).toContain("+console.log('with feature')")
+    expect(diff).toContain("-console.log('without feature')")
+  })
+
+  it('falls back to raw carve diff when operations produce empty rebuild', () => {
+    const feature: CarvedFeature = {
+      id: 'feature-y',
+      prompt: 'Restore feature y',
+      description: 'Feature with no originalFiles',
+      complexity: 'small',
+      originalFiles: {},
+      operations: [
+        { path: 'src/thing.ts', action: 'delete' },
+      ],
+      diff: 'diff --git a/src/thing.ts b/src/thing.ts\ndeleted file mode 100644',
+    }
+
+    const diff = getGroundTruthDiff(feature)
     expect(diff).toBe(feature.diff)
-    expect(diff).toContain('src/index.ts')
   })
 })
 

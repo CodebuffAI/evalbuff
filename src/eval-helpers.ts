@@ -98,8 +98,11 @@ export function computeGroundTruthDiff(feature: CarvedFeature): string {
 }
 
 export function getGroundTruthDiff(feature: CarvedFeature): string {
-  if (feature.diff.trim()) return feature.diff
-  return computeGroundTruthDiff(feature)
+  // Prefer computeGroundTruthDiff which flips the carve into a rebuild diff
+  // (+ lines for code to be added back). feature.diff is the raw carve removal.
+  const rebuilt = computeGroundTruthDiff(feature)
+  if (rebuilt.trim()) return rebuilt
+  return feature.diff
 }
 
 export function ensureGitIdentity(repoPath: string): void {
