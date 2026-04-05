@@ -59,6 +59,7 @@ ${judgeSuggestions || '(No suggestions were made)'}
 
 Rules:
 - ONLY modify files in docs/, AGENTS.md, or CLAUDE.md. Do NOT modify source code.
+- **Do NOT edit AGENTS.md beyond adding new docs to its index.** The only allowed changes to AGENTS.md are: (a) adding/removing entries in the doc index when you create or delete files under docs/, and (b) correcting existing information that is factually wrong. Do NOT add new paragraphs, prose, sections, or explanatory text above or below existing content. Put all new guidance in docs/ files and link to them from the index.
 - It's OK to delete doc files that are redundant or low-value.
 - The goal is a minimal, high-signal set of docs that a coding agent can use to build ANY feature, including ones that don't exist yet.
 - Less is more — 5 great docs are better than 15 mediocre ones.
