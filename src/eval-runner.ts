@@ -11,6 +11,8 @@ import type { CarvedFeature } from './carve-features'
 import type { JudgingResult } from './judge'
 import type { RunnerResult } from './runners/runner'
 
+import { execFileSync } from 'child_process'
+
 export interface TaskResult {
   featureId: string
   prompt: string
@@ -123,6 +125,93 @@ export async function runAgentOnCarve(opts: {
     } catch (error) {
       return createInfrastructureFailureResult(feature, error)
     }
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Re-judge a baseline task using the current docs in docsSourcePath.
+ *
+ * Recreates the exact repo state the original judge saw (carved repo + agent's
+ * baseline diff applied), but with whatever docs currently live in
+ * docsSourcePath instead of the baseline-era docs. This isolates whether the
+ * judge itself scores differently once given better docs, independent of any
+ * agent behavior change.
+ */
+export async function rejudgeBaselineWithCurrentDocs(opts: {
+  idx: number
+  total: number
+  repoPath: string
+  feature: CarvedFeature
+  baselineDiff: string
+  groundTruthDiff: string
+  initCommand?: string
+  docsSourcePath: string
+}): Promise<JudgingResult> {
+  const { idx, total, repoPath, feature, baselineDiff, groundTruthDiff, initCommand, docsSourcePath } = opts
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-rejudge-'))
+  const repoDir = path.join(tempDir, 'repo')
+
+  try {
+    // Clone and check out the same base SHA
+    execSync(`git clone --no-checkout "${repoPath}" "${repoDir}"`, { stdio: 'ignore' })
+    const headSha = execSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf-8' }).trim()
+    execSync(`git checkout ${headSha}`, { cwd: repoDir, stdio: 'ignore' })
+    ensureGitIdentity(repoDir)
+
+    // Apply carve, matching the original eval setup
+    applyCarveOperations(repoDir, feature.operations)
+    execSync('git add -A', { cwd: repoDir, stdio: 'ignore' })
+    execSync(`git commit -m "carve: remove ${feature.id}" --allow-empty`, { cwd: repoDir, stdio: 'ignore' })
+
+    // Copy CURRENT docs (which have been refactored by loop N) into the repo
+    copyDocsIntoRepo(docsSourcePath, repoDir)
+
+    // Apply the baseline agent's diff to reproduce the state the judge saw
+    if (baselineDiff.trim()) {
+      const patchPath = path.join(tempDir, 'baseline.patch')
+      fs.writeFileSync(patchPath, baselineDiff.endsWith('\n') ? baselineDiff : baselineDiff + '\n')
+      try {
+        execFileSync('git', ['apply', '--whitespace=nowarn', '--allow-empty', patchPath], {
+          cwd: repoDir,
+          stdio: 'ignore',
+        })
+      } catch (applyErr) {
+        // Fall back to 3-way apply; if that fails, propagate — rejudge is meaningless without the diff
+        execFileSync('git', ['apply', '--3way', '--whitespace=nowarn', patchPath], {
+          cwd: repoDir,
+          stdio: 'ignore',
+        })
+      }
+    }
+
+    // Re-init (e.g. npm install) — the judge may need a runnable repo for E2E testing
+    if (initCommand) {
+      try {
+        execSync(initCommand, { cwd: repoDir, stdio: 'ignore', timeout: 120000 })
+      } catch (e) {
+        console.warn(`  [Rejudge ${idx + 1}/${total}] Init command failed: ${e}`)
+      }
+    }
+
+    console.log(`  [Rejudge ${idx + 1}/${total}] Re-judging baseline ${feature.id} with current docs...`)
+
+    const JUDGE_TIMEOUT_MS = 35 * 60 * 1000
+    return await Promise.race([
+      judgeTaskResult({
+        taskPrompt: feature.prompt,
+        agentDiff: baselineDiff,
+        groundTruthDiff,
+        repoDir,
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Rejudge timed out after ${JUDGE_TIMEOUT_MS / 1000}s`)), JUDGE_TIMEOUT_MS),
+      ),
+    ])
   } finally {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true })

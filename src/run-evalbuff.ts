@@ -19,8 +19,8 @@ import path from 'path'
 import { planFeatures, carveFeature } from './carve-features'
 import { collectDocSuggestions, runDocsRefactorAgent } from './docs-refactor'
 import { selectRandom, getGroundTruthDiff, getDocsSnapshot, computeDocsDiffText } from './eval-helpers'
-import { runAgentOnCarve } from './eval-runner'
-import { saveRoundResults, saveSummary } from './report'
+import { runAgentOnCarve, rejudgeBaselineWithCurrentDocs } from './eval-runner'
+import { saveRoundResults, saveBaselineRejudgeResults, saveSummary } from './report'
 import { events } from './tui/events'
 
 import type { CarvedFeature } from './carve-features'
@@ -127,6 +127,98 @@ async function runEvalRound(
   })
 
   return { round, tasks: results, avgScore, totalCost }
+}
+
+// --- Baseline rejudge round ---
+//
+// Re-runs the judge on the baseline's stored diffs/traces after docs have been
+// updated. The agent's work is fixed — only the docs given to the judge change.
+// This lets us see whether score changes over loops reflect real agent
+// improvement or merely judge recalibration from better docs.
+
+async function runBaselineRejudgeRound(
+  baseline: RoundResult,
+  features: CarvedFeature[],
+  groundTruthDiffs: Map<string, string>,
+  opts: EvalbuffOptions,
+  loop: number,
+): Promise<RoundResult> {
+  console.log(`\n${'-'.repeat(60)}`)
+  console.log(`BASELINE REJUDGE (loop ${loop}) — Re-scoring ${baseline.tasks.length} baseline diffs with current docs`)
+  console.log(`${'-'.repeat(60)}`)
+
+  const featureById = new Map(features.map(f => [f.id, f]))
+  const results: TaskResult[] = []
+  const queue = baseline.tasks.map((baselineTask, i) => ({ baselineTask, i }))
+  let next = 0
+
+  async function worker(): Promise<void> {
+    while (next < queue.length) {
+      const { baselineTask, i } = queue[next++]
+      const feature = featureById.get(baselineTask.featureId)
+
+      // If baseline task itself failed (infra error) or we can't find the feature,
+      // carry the failure forward unchanged.
+      if (!feature || baselineTask.score < 0) {
+        results[i] = baselineTask
+        continue
+      }
+
+      try {
+        const judging = await rejudgeBaselineWithCurrentDocs({
+          idx: i,
+          total: queue.length,
+          repoPath: opts.repoPath,
+          feature,
+          baselineDiff: baselineTask.diff,
+          groundTruthDiff: groundTruthDiffs.get(feature.id) || '',
+          initCommand: opts.initCommand,
+          docsSourcePath: opts.repoPath,
+        })
+        results[i] = {
+          ...baselineTask,
+          score: judging.overallScore,
+          judging,
+          costEstimate: 0, // rejudge cost is tracked separately in the judge process
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        console.warn(`  [Rejudge] ${baselineTask.featureId} failed: ${msg.slice(0, 200)}`)
+        results[i] = {
+          ...baselineTask,
+          score: -1,
+          judging: {
+            analysis: `Rejudge failed: ${msg.slice(0, 500)}`,
+            strengths: [],
+            weaknesses: ['Rejudge failed'],
+            e2eTestsPerformed: [],
+            completionScore: -1,
+            codeQualityScore: -1,
+            e2eScore: -1,
+            overallScore: -1,
+          },
+        }
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(opts.parallelism, queue.length) }, () => worker()),
+  )
+
+  const valid = results.filter((r) => r.score >= 0)
+  const avgScore = valid.length > 0
+    ? valid.reduce((a, r) => a + r.score, 0) / valid.length
+    : 0
+
+  console.log(`\nBaseline rejudge (loop ${loop}) results:`)
+  for (const r of results) {
+    const status = r.score >= 0 ? `${r.score.toFixed(1)}/10` : 'FAILED'
+    console.log(`  ${r.featureId}: ${status}`)
+  }
+  console.log(`  Average: ${avgScore.toFixed(1)}/10 (vs baseline ${baseline.avgScore.toFixed(1)}/10)`)
+
+  return { round: loop, tasks: results, avgScore, totalCost: 0 }
 }
 
 // --- Main orchestrator ---
@@ -249,6 +341,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
 
   let totalCost = baseline.totalCost
   const roundResults: RoundResult[] = [baseline]
+  const baselineRejudgeResults: RoundResult[] = []
   let previousResults = baseline
 
   // --- Step 4: Improvement loops ---
@@ -291,7 +384,18 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     roundResults.push(results)
     previousResults = results
 
-    console.log(`\n  Loop ${loop} complete. Score: ${baseline.avgScore.toFixed(1)} → ${results.avgScore.toFixed(1)}`)
+    // 4c: Re-judge the BASELINE diffs against the current docs. This tells us
+    // whether judge scores are drifting because of docs-informed recalibration
+    // rather than real agent improvement.
+    console.log(`\n--- Step 4c: Re-judging baseline with current docs ---`)
+    const rejudged = await runBaselineRejudgeRound(baseline, features, groundTruthDiffs, opts, loop)
+    saveBaselineRejudgeResults(logDir, rejudged)
+    baselineRejudgeResults.push(rejudged)
+
+    console.log(
+      `\n  Loop ${loop} complete. Score: ${baseline.avgScore.toFixed(1)} → ${results.avgScore.toFixed(1)}` +
+      ` (baseline rejudged: ${baseline.avgScore.toFixed(1)} → ${rejudged.avgScore.toFixed(1)})`,
+    )
   }
 
   // --- Summary ---
@@ -310,9 +414,10 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     })),
     totalCost,
     scoreProgression: roundResults.map((r) => r.avgScore),
+    baselineRejudgeProgression: baselineRejudgeResults.map((r) => r.avgScore),
   }
 
-  saveSummary(logDir, summary, roundResults, opts)
+  saveSummary(logDir, summary, roundResults, opts, baselineRejudgeResults)
 
   events.send({
     type: 'run_complete',

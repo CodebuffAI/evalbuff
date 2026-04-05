@@ -26,12 +26,42 @@ export interface EvalSummary {
   }>
   totalCost: number
   scoreProgression: number[]
+  // Baseline re-judged after each loop's docs update. Index 0 corresponds to
+  // loop 1 (first re-judge), etc. The original baseline score is already in
+  // scoreProgression[0]. A flat or rising line here with a rising agent line
+  // suggests the docs are improving the agent beyond just judge recalibration.
+  baselineRejudgeProgression?: number[]
 }
 
 export interface EvalOptions {
   loops: number
   codingModel: string
   docsModel: string
+}
+
+export function saveBaselineRejudgeResults(logDir: string, roundResult: RoundResult): void {
+  // Persist rejudged-baseline results in a sibling directory so they don't
+  // collide with the normal per-round directories.
+  const roundDir = path.join(logDir, `baseline-rejudge-loop-${roundResult.round}`)
+  fs.mkdirSync(roundDir, { recursive: true })
+
+  for (const task of roundResult.tasks) {
+    const taskDir = path.join(roundDir, task.featureId)
+    fs.mkdirSync(taskDir, { recursive: true })
+    // We don't re-persist the trace/diff — those are identical to baseline.
+    fs.writeFileSync(path.join(taskDir, 'judging.json'), JSON.stringify(task.judging, null, 2))
+    fs.writeFileSync(path.join(taskDir, 'score.txt'), task.score.toString())
+  }
+
+  const summary = {
+    loop: roundResult.round,
+    avgScore: roundResult.avgScore,
+    tasks: roundResult.tasks.map((t) => ({
+      featureId: t.featureId,
+      score: t.score,
+    })),
+  }
+  fs.writeFileSync(path.join(roundDir, 'summary.json'), JSON.stringify(summary, null, 2))
 }
 
 export function saveRoundResults(logDir: string, roundResult: RoundResult): void {
@@ -84,6 +114,7 @@ export function saveSummary(
   summary: EvalSummary,
   roundResults: RoundResult[],
   opts: EvalOptions,
+  baselineRejudgeResults: RoundResult[] = [],
 ): void {
   fs.writeFileSync(path.join(logDir, 'summary.json'), JSON.stringify(summary, null, 2))
 
@@ -129,6 +160,32 @@ export function saveSummary(
   }
   push('')
 
+  // --- Baseline rejudge trajectory ---
+  // Same baseline diffs, re-scored after each loop's docs update. Disentangles
+  // judge recalibration from real agent improvement.
+  if (summary.baselineRejudgeProgression && summary.baselineRejudgeProgression.length > 0) {
+    push('## Baseline Rejudge Trajectory', '')
+    push('_Same baseline diffs, re-scored after each loop\'s docs update._', '')
+    push('```')
+    // Include the original baseline score as loop 0 for reference alignment.
+    push(`${'baseline'.padEnd(12)} ${summary.scoreProgression[0].toFixed(1).padStart(5)}/10  ${'█'.repeat(Math.round(summary.scoreProgression[0] * 2))}`)
+    for (let i = 0; i < summary.baselineRejudgeProgression.length; i++) {
+      const score = summary.baselineRejudgeProgression[i]
+      const bar = '█'.repeat(Math.round(score * 2))
+      push(`${('loop ' + (i + 1)).padEnd(12)} ${score.toFixed(1).padStart(5)}/10  ${bar}`)
+    }
+    push('```')
+
+    const judgeDelta = summary.baselineRejudgeProgression[summary.baselineRejudgeProgression.length - 1] - summary.scoreProgression[0]
+    const agentDelta = delta - judgeDelta
+    push(
+      '',
+      `**Judge recalibration (docs → baseline diffs):** ${judgeDelta > 0 ? '+' : ''}${judgeDelta.toFixed(1)} points`,
+      `**Estimated agent improvement (net − judge recalibration):** ${agentDelta > 0 ? '+' : ''}${agentDelta.toFixed(1)} points`,
+      '',
+    )
+  }
+
   // --- Per-round score table ---
   push('## Scores by Round', '')
 
@@ -152,6 +209,31 @@ export function saveSummary(
   const costRow = roundResults.map((r) => `$${r.totalCost.toFixed(2)}`)
   push(`| **Cost** | ${costRow.join(' | ')} |`)
   push('')
+
+  // --- Baseline rejudge table (parallel scoring of the same baseline diffs) ---
+  if (baselineRejudgeResults.length > 0) {
+    push('## Baseline Scored by Each Loop\'s Docs', '')
+    push('_Baseline agent diffs held constant; only the docs the judge sees change._', '')
+    const rjHeader = ['Feature', 'Baseline', ...baselineRejudgeResults.map((r) => `Loop ${r.round}`)]
+    push(`| ${rjHeader.join(' | ')} |`)
+    push(`| ${rjHeader.map(() => '---').join(' | ')} |`)
+    for (const fid of featureIds) {
+      const baselineTask = roundResults[0].tasks.find((t) => t.featureId === fid)
+      const baselineCell = !baselineTask || baselineTask.score < 0 ? 'FAIL' : baselineTask.score.toFixed(1)
+      const loopCells = baselineRejudgeResults.map((r) => {
+        const task = r.tasks.find((t) => t.featureId === fid)
+        if (!task || task.score < 0) return 'FAIL'
+        return task.score.toFixed(1)
+      })
+      push(`| ${fid} | ${baselineCell} | ${loopCells.join(' | ')} |`)
+    }
+    const rjAvgRow = [
+      roundResults[0].avgScore.toFixed(1),
+      ...baselineRejudgeResults.map((r) => r.avgScore.toFixed(1)),
+    ]
+    push(`| **Average** | ${rjAvgRow.join(' | ')} |`)
+    push('')
+  }
 
   // --- Per-round detail ---
   for (const round of roundResults) {
