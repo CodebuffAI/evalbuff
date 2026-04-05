@@ -14,7 +14,8 @@
     "tui:demo": "bun run src/tui/main.tsx --demo",
     "tui:watch": "bun run src/tui/main.tsx --log-dir",
     "compress-trace": "bun run src/trace-compressor.ts",
-    "restore-trace": "bun run src/trace-compressor.ts --restore"
+    "restore-trace": "bun run src/trace-compressor.ts --restore",
+    "perfect": "bun run src/perfect-feature.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.89",
