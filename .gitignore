@@ -6,3 +6,5 @@ dist/
 *.tsbuildinfo
 bun.lockb
 .gstack/
+old
+.DS_Store
