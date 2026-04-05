@@ -4,7 +4,7 @@ Evalbuff improves a coding agent's performance by running it for practice to re-
 
 ## Docs
 
-**MANDATORY**: You MUST read the relevant docs below before implementing ANY changes. Do not rely on pre-training knowledge about this codebase — always retrieve and read the actual docs first. Skipping docs is the #1 cause of failed implementations.
+**MANDATORY**: You MUST read the relevant docs below before implementing ANY changes or answering ANY question.
 
 Start your response by reading whichever `docs/` files are relevant to your task based on the descriptions below:
 
