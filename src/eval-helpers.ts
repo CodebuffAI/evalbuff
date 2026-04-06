@@ -272,6 +272,56 @@ export function computeDocsDiffText(
   return lines.join("\n")
 }
 
+const MAX_FILE_DIFF_CHARS = 150_000
+const MAX_TOTAL_DIFF_CHARS = 500_000
+
+/** Truncate individual file diffs and the overall diff to stay within context limits. */
+export function truncateDiff(
+  diff: string,
+  maxFileChars = MAX_FILE_DIFF_CHARS,
+  maxTotalChars = MAX_TOTAL_DIFF_CHARS,
+): string {
+  if (diff.length <= maxFileChars) return diff
+
+  // Split into per-file chunks (each starts with "diff --git" or "diff --no-index")
+  const fileChunks: string[] = []
+  const fileDiffPattern = /^diff --/gm
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = fileDiffPattern.exec(diff)) !== null) {
+    if (match.index > lastIndex) {
+      fileChunks.push(diff.slice(lastIndex, match.index))
+    }
+    lastIndex = match.index
+  }
+  if (lastIndex < diff.length) {
+    fileChunks.push(diff.slice(lastIndex))
+  }
+
+  // Truncate each file's diff individually
+  const truncatedChunks = fileChunks.map((chunk) => {
+    if (chunk.length <= maxFileChars) return chunk
+    const cut = chunk.slice(0, maxFileChars)
+    const lastNewline = cut.lastIndexOf("\n")
+    const cutPoint = lastNewline > maxFileChars * 0.8 ? lastNewline : maxFileChars
+    const omitted = chunk.length - cutPoint
+    return `${chunk.slice(0, cutPoint)}\n\n... [FILE TRUNCATED — ${omitted.toLocaleString()} characters omitted] ...`
+  })
+
+  // Cap overall size
+  let result = truncatedChunks.join("")
+  if (result.length > maxTotalChars) {
+    const cut = result.slice(0, maxTotalChars)
+    const lastNewline = cut.lastIndexOf("\n")
+    const cutPoint =
+      lastNewline > maxTotalChars * 0.8 ? lastNewline : maxTotalChars
+    const omitted = result.length - cutPoint
+    result = `${result.slice(0, cutPoint)}\n\n... [DIFF TRUNCATED — ${omitted.toLocaleString()} characters omitted] ...`
+  }
+
+  return result
+}
+
 function listUntrackedFiles(repoPath: string, pathspecs: string[]): string[] {
   const args = ["ls-files", "--others", "--exclude-standard"]
   if (pathspecs.length > 0) args.push("--", ...pathspecs)

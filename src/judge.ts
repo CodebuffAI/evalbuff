@@ -4,6 +4,8 @@ import path from 'path'
 import { Codex } from '@openai/codex-sdk'
 import { z } from 'zod/v4'
 
+import { truncateDiff } from './eval-helpers'
+
 import type { ThreadItem } from '@openai/codex-sdk'
 
 export const JudgingResultSchema = z.object({
@@ -50,7 +52,9 @@ function buildReviewerPrompt(input: {
   error?: string
   docsDir?: string
 }): string {
-  const { taskPrompt, agentDiff, groundTruthDiff, error, docsDir } = input
+  const { taskPrompt, agentDiff: rawAgentDiff, groundTruthDiff: rawGroundTruthDiff, error, docsDir } = input
+  const agentDiff = truncateDiff(rawAgentDiff)
+  const groundTruthDiff = rawGroundTruthDiff ? truncateDiff(rawGroundTruthDiff) : rawGroundTruthDiff
 
   const groundTruth = groundTruthDiff
     ? `## Ground Truth Changes (One valid implementation)

@@ -37,6 +37,7 @@ import {
   getGroundTruthDiff,
   computeDocsDiffText,
   syncDocsIntoRepo,
+  truncateDiff,
 } from './eval-helpers'
 
 import type { CarvedFeature } from './carve-features'
@@ -117,7 +118,9 @@ function buildFlexibleJudgePrompt(input: {
   groundTruthDiff: string
   round: number
 }): string {
-  const { taskPrompt, agentDiff, groundTruthDiff, round } = input
+  const { taskPrompt, agentDiff: rawAgentDiff, groundTruthDiff: rawGroundTruthDiff, round } = input
+  const agentDiff = truncateDiff(rawAgentDiff)
+  const groundTruthDiff = truncateDiff(rawGroundTruthDiff)
 
   return `You are a senior engineer performing a thorough code review with hands-on E2E testing.
 
@@ -275,7 +278,9 @@ function buildAnalyzerPrompt(input: {
   previousDiagnoses: string[]
   currentDocs: Record<string, string>
 }): string {
-  const { taskPrompt, agentDiff, groundTruthDiff, judging, round, previousDiagnoses, currentDocs } = input
+  const { taskPrompt, agentDiff: rawAgentDiff, groundTruthDiff: rawGroundTruthDiff, judging, round, previousDiagnoses, currentDocs } = input
+  const agentDiff = truncateDiff(rawAgentDiff)
+  const groundTruthDiff = truncateDiff(rawGroundTruthDiff)
 
   const prevSection = previousDiagnoses.length > 0
     ? `## Previous Diagnoses (what we already tried)\n${previousDiagnoses.map((d, i) => `Round ${i + 1}: ${d}`).join('\n\n')}\n\nDo NOT repeat suggestions that were already tried. Find NEW angles.`
