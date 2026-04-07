@@ -41,7 +41,7 @@ import {
 } from './eval-helpers'
 
 import type { CarvedFeature } from './carve-features'
-import type { JudgingResult } from './judge'
+import type { JudgingResult, Suggestion } from './judge'
 import type { RunnerResult } from './runners/runner'
 
 // ---------------------------------------------------------------------------
@@ -194,13 +194,13 @@ Write your judgment to \`evalbuff-review-result.json\`:
   "codeQualityScore": 9,
   "e2eScore": 7,
   "overallScore": 8,
-  "docSuggestions": ["Suggestion 1", "Suggestion 2"]
+  "docSuggestions": [{ "text": "Suggestion 1", "priority": 70 }, { "text": "Suggestion 2", "priority": 40 }]
 }
 \`\`\`
 
 ## Documentation Suggestions
 
-This is round ${round} of an iterative improvement process. Based on what you find, suggest doc changes that would help a coding agent do better WITHOUT giving away the specific implementation.
+This is round ${round} of an iterative improvement process. Based on what you find, suggest doc changes that would help a coding agent do better WITHOUT giving away the specific implementation. Each suggestion is an object with \`text\` (the suggestion) and \`priority\` (0-100, where 100 is extremely impactful).
 
 Good: "Document that all route handlers must be registered in src/routes/index.ts"
 Bad: "Tell the agent to add a UserProfile route to src/routes/index.ts"
@@ -246,7 +246,11 @@ async function runFlexibleJudge(
         codeQualityScore: typeof raw.codeQualityScore === 'number' ? raw.codeQualityScore : raw.overallScore ?? 0,
         e2eScore: typeof raw.e2eScore === 'number' ? raw.e2eScore : raw.overallScore ?? 0,
         overallScore: typeof raw.overallScore === 'number' ? raw.overallScore : 0,
-        docSuggestions: Array.isArray(raw.docSuggestions) ? raw.docSuggestions : undefined,
+        docSuggestions: Array.isArray(raw.docSuggestions)
+          ? raw.docSuggestions.map((s: any) =>
+              typeof s === 'string' ? { text: s, priority: 50 } : s
+            )
+          : undefined,
       }
     }
   } catch (err) {
@@ -315,7 +319,7 @@ ${agentDiff || '(No changes)'}
 **Strengths:** ${judging.strengths.join(', ') || 'None listed'}
 **Weaknesses:** ${judging.weaknesses.join(', ') || 'None listed'}
 **E2E tests performed:** ${judging.e2eTestsPerformed.join(', ') || 'None'}
-**Judge's doc suggestions:** ${judging.docSuggestions?.join('\n- ') || 'None'}
+**Judge's doc suggestions:** ${judging.docSuggestions?.map(s => `[P${s.priority}] ${s.text}`).join('\n- ') || 'None'}
 
 ## Ground Truth (reference only — the agent should NOT be told this)
 \`\`\`diff
@@ -338,8 +342,8 @@ Diagnose the root cause, then pick whichever strategies (one or more) best addre
 {
   "diagnosis": "A 2-3 sentence explanation of the root cause — what knowledge gap or process failure led to the imperfect score",
   "docSuggestions": [
-    "Each suggestion should specify which file to create/update AND include the full content. E.g.: 'Create docs/routing.md: All routes must be registered in src/routes/index.ts by calling registerRoute()...'",
-    "Use whichever strategy categories are most relevant to the actual failure"
+    { "text": "Each suggestion should specify which file to create/update AND include the full content. E.g.: 'Create docs/routing.md: All routes must be registered in src/routes/index.ts by calling registerRoute()...'", "priority": 80 },
+    { "text": "Use whichever strategy categories are most relevant to the actual failure", "priority": 60 }
   ]
 }
 \`\`\`
@@ -361,7 +365,7 @@ async function runAnalyzer(
     currentDocs: Record<string, string>
   },
   model: string,
-): Promise<{ diagnosis: string; docSuggestions: string[] }> {
+): Promise<{ diagnosis: string; docSuggestions: Suggestion[] }> {
   const prompt = buildAnalyzerPrompt(input)
 
   console.log(`  [Analyzer] Diagnosing failure (${model})...`)
@@ -378,9 +382,12 @@ async function runAnalyzer(
   try {
     if (fs.existsSync(resultPath)) {
       const raw = JSON.parse(fs.readFileSync(resultPath, 'utf-8'))
+      const rawSuggestions = Array.isArray(raw.docSuggestions) ? raw.docSuggestions : []
       return {
         diagnosis: raw.diagnosis || 'No diagnosis produced',
-        docSuggestions: Array.isArray(raw.docSuggestions) ? raw.docSuggestions : [],
+        docSuggestions: rawSuggestions.map((s: any) =>
+          typeof s === 'string' ? { text: s, priority: 50 } : s
+        ),
       }
     }
   } catch (err) {
@@ -396,7 +403,7 @@ async function runAnalyzer(
 
 async function runDocsWriter(
   repoPath: string,
-  suggestions: string[],
+  suggestions: Suggestion[],
   model: string,
 ): Promise<void> {
   if (suggestions.length === 0) {
@@ -407,11 +414,15 @@ async function runDocsWriter(
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-docs-'))
   const repoDir = path.join(tempDir, 'repo')
 
+  const sorted = [...suggestions].sort((a, b) => b.priority - a.priority)
+
   const prompt = `You are a documentation writer for a coding project. Your job is to update the project docs to help AI coding agents build features successfully.
 
 ## Suggestions to Apply
 
-${suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n')}
+Each suggestion has a priority (0-100). Focus on high-priority suggestions (40+). Ignore suggestions with priority below 20 unless they reinforce a pattern you're already documenting.
+
+${sorted.map((s, i) => `${i + 1}. [priority ${s.priority}] ${s.text}`).join('\n')}
 
 ## Rules
 

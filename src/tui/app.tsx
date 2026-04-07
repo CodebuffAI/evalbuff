@@ -451,7 +451,7 @@ function FeatureDetailView({ featureId, state, logData, selectedRound, fileCurso
                 {judging.docSuggestions && judging.docSuggestions.length > 0 && (
                   <box flexDirection="column" marginTop={1}>
                     <text fg="#f9e2af" attributes={1}>Doc Suggestions:</text>
-                    {judging.docSuggestions.map((d, i) => <text key={i} fg="#f9e2af" wrapMode="word">{' > '}{d}</text>)}
+                    {judging.docSuggestions.map((d, i) => <text key={i} fg="#f9e2af" wrapMode="word">{' > '}[P{d.priority}] {d.text}</text>)}
                   </box>
                 )}
               </box>

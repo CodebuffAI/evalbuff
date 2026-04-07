@@ -32,6 +32,11 @@ export interface CarvedFeature {
   diff: string
 }
 
+export interface Suggestion {
+  text: string
+  priority: number
+}
+
 export interface JudgingResult {
   analysis: string
   strengths: string[]
@@ -41,7 +46,7 @@ export interface JudgingResult {
   codeQualityScore: number
   e2eScore: number
   overallScore: number
-  docSuggestions?: string[]
+  docSuggestions?: Suggestion[]
 }
 
 export interface RoundFeatureData {

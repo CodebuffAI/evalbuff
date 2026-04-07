@@ -291,7 +291,7 @@ export function saveSummary(
       const suggestions = task.judging.docSuggestions
       if (suggestions && suggestions.length > 0) {
         push('**Doc suggestions:**')
-        for (const s of suggestions) push(`- ${s}`)
+        for (const s of suggestions) push(`- [P${s.priority}] ${s.text}`)
         push('')
       }
 
@@ -299,7 +299,7 @@ export function saveSummary(
       const projSuggestions = task.judging.projectSuggestions
       if (projSuggestions && projSuggestions.length > 0) {
         push('**Project suggestions:**')
-        for (const s of projSuggestions) push(`- ${s}`)
+        for (const s of projSuggestions) push(`- [P${s.priority}] ${s.text}`)
         push('')
       }
 

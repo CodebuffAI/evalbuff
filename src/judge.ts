@@ -8,6 +8,19 @@ import { truncateDiff } from './eval-helpers'
 
 import type { ThreadItem } from '@openai/codex-sdk'
 
+export const SuggestionSchema = z.object({
+  text: z.string().describe('The suggestion content'),
+  priority: z
+    .number()
+    .min(0)
+    .max(100)
+    .describe(
+      'Priority from 0 (totally unnecessary) to 100 (extremely impactful and urgent)'
+    ),
+})
+
+export type Suggestion = z.infer<typeof SuggestionSchema>
+
 export const JudgingResultSchema = z.object({
   analysis: z
     .string()
@@ -36,16 +49,16 @@ export const JudgingResultSchema = z.object({
     .describe('How well the change works when tested end-to-end'),
   overallScore: z.number().min(0).max(10).describe('Combined assessment'),
   docSuggestions: z
-    .array(z.string())
+    .array(SuggestionSchema)
     .optional()
     .describe(
-      'Informal recommendations for documentation changes to help future coding agents AND future reviewers'
+      'Recommendations for documentation changes to help future coding agents AND future reviewers, each with a priority score'
     ),
   projectSuggestions: z
-    .array(z.string())
+    .array(SuggestionSchema)
     .optional()
     .describe(
-      'Suggestions for improving the project itself — refactors, dead code removal, test infrastructure, dependency cleanup, or new features that would make the codebase easier for agents to work with'
+      'Suggestions for improving the project itself — refactors, dead code removal, test infrastructure, dependency cleanup, or new features — each with a priority score'
     ),
 })
 
@@ -133,18 +146,28 @@ After your review and testing, write your judgment to the file \`${RESULT_FILE_N
   "e2eScore": 6,
   "overallScore": 7,
   "docSuggestions": [
-    "Update docs/architecture.md: Add a section 'Route Registration'. All API routes must be registered in src/routes/index.ts by calling registerRoute(). The route handler file goes in src/routes/<name>.ts and must export a default function with signature (req: Request, res: Response) => void. Without registration the route silently 404s — there is no auto-discovery.",
-    "Create docs/patterns/error-handling.md: All async route handlers in src/routes/ must be wrapped with withErrorHandler() from src/middleware/error.ts. This wrapper catches thrown errors and returns a standardized { error: string, code: number } JSON response. Without it, unhandled rejections crash the server. Example: export default withErrorHandler(async (req, res) => { ... })"
+    { "text": "Update docs/architecture.md: Add a section 'Route Registration'. All API routes must be registered in src/routes/index.ts by calling registerRoute(). The route handler file goes in src/routes/<name>.ts and must export a default function with signature (req: Request, res: Response) => void. Without registration the route silently 404s — there is no auto-discovery.", "priority": 85 },
+    { "text": "Create docs/patterns/error-handling.md: All async route handlers in src/routes/ must be wrapped with withErrorHandler() from src/middleware/error.ts. This wrapper catches thrown errors and returns a standardized { error: string, code: number } JSON response. Without it, unhandled rejections crash the server. Example: export default withErrorHandler(async (req, res) => { ... })", "priority": 70 }
   ],
   "projectSuggestions": [
-    "Refactor: The error handling middleware in src/middleware/error.ts duplicates logic from src/utils/errors.ts. Consolidating these into a single module would reduce confusion for agents trying to understand which error utility to use.",
-    "Test infrastructure: There are no integration tests for the API routes. Adding a test harness that spins up the dev server and runs requests against it would catch the class of bugs where routes 404 due to missing registration.",
-    "Dead code: src/utils/legacy-auth.ts is imported nowhere and appears to be left over from a previous auth system. Removing it would reduce noise for agents scanning the codebase."
+    { "text": "Refactor: The error handling middleware in src/middleware/error.ts duplicates logic from src/utils/errors.ts. Consolidating these into a single module would reduce confusion for agents trying to understand which error utility to use.", "priority": 60 },
+    { "text": "Test infrastructure: There are no integration tests for the API routes. Adding a test harness that spins up the dev server and runs requests against it would catch the class of bugs where routes 404 due to missing registration.", "priority": 80 },
+    { "text": "Dead code: src/utils/legacy-auth.ts is imported nowhere and appears to be left over from a previous auth system. Removing it would reduce noise for agents scanning the codebase.", "priority": 30 }
   ]
 }
 \`\`\`
 
 All scores are 0-10. The e2eScore specifically measures how well the change works when actually tested, not just how the code looks.
+
+## Priority Scoring
+
+Every doc suggestion and project suggestion must include a \`priority\` field (0-100):
+- **80-100**: Critical pattern that caused a major failure; fixing this would prevent a whole class of bugs.
+- **50-79**: Useful improvement that would meaningfully help agents or reviewers.
+- **20-49**: Minor nice-to-have; low impact on agent success.
+- **0-19**: Trivial or barely relevant; unlikely to matter.
+
+Be honest with priorities. A suggestion that addresses a root-cause failure pattern that would affect many features deserves 80+. A minor style or cleanup suggestion is 20-40.
 
 ## Documentation Suggestions
 
@@ -195,9 +218,9 @@ Each suggestion should be a self-contained description of one change, with enoug
 - What the end state should look like
 
 Good project suggestion:
-- "Refactor: src/middleware/error.ts and src/utils/errors.ts both define error formatting logic. Consolidate into src/utils/errors.ts and re-export from middleware. This would eliminate the confusion the agent had about which module to import for error handling."
-- "Test infrastructure: Add a test helper in tests/helpers/server.ts that starts the dev server on a random port, seeds the DB, and returns a cleanup function. Currently every agent that needs E2E testing has to figure out server startup from scratch."
-- "Dead code: src/utils/legacy-auth.ts is imported nowhere. Remove it to reduce noise."
+- { "text": "Refactor: src/middleware/error.ts and src/utils/errors.ts both define error formatting logic. Consolidate into src/utils/errors.ts and re-export from middleware.", "priority": 60 }
+- { "text": "Test infrastructure: Add a test helper in tests/helpers/server.ts that starts the dev server on a random port, seeds the DB, and returns a cleanup function.", "priority": 80 }
+- { "text": "Dead code: src/utils/legacy-auth.ts is imported nowhere. Remove it to reduce noise.", "priority": 25 }
 
 If the agent scored 9.5+ or no project-level issues were observed, leave projectSuggestions empty.
 

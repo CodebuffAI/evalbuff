@@ -17,7 +17,7 @@ export function collectDocSuggestions(tasks: TaskResult[]): string {
 
     sections.push(
       `### ${task.featureId} (score: ${task.score.toFixed(1)}/10)\n` +
-      suggestions.map((s) => `- ${s}`).join('\n'),
+      suggestions.map((s) => `- [priority ${s.priority}] ${s.text}`).join('\n'),
     )
   }
 
@@ -33,7 +33,7 @@ export function collectProjectSuggestions(tasks: TaskResult[]): string {
 
     sections.push(
       `### ${task.featureId} (score: ${task.score.toFixed(1)}/10)\n` +
-      suggestions.map((s) => `- ${s}`).join('\n'),
+      suggestions.map((s) => `- [priority ${s.priority}] ${s.text}`).join('\n'),
     )
   }
 
@@ -57,7 +57,9 @@ The purpose of these docs is to help a coding agent successfully build NEW featu
 
 ## Judge Suggestions
 
-Multiple judge agents reviewed coding agent attempts and identified documentation gaps. Here are their suggestions:
+Multiple judge agents reviewed coding agent attempts and identified documentation gaps. Here are their suggestions, each tagged with a priority score (0-100). Higher priority means more impactful. When the same suggestion appears multiple times across features, that's a signal it deserves higher effective priority.
+
+**Focus on suggestions with priority 40+. Ignore suggestions with priority below 20 unless they appear multiple times.** Low-priority suggestions are minor nice-to-haves that aren't worth the docs clutter.
 
 ${judgeSuggestions || '(No suggestions were made)'}
 
@@ -167,7 +169,7 @@ export async function runPromptWriterAgent(
 
 An automated evaluation system ran a coding agent on multiple tasks in this repository, and judges reviewed the results. Along with documentation suggestions, the judges also identified ways the **project itself** could be improved — refactors, dead code removal, test infrastructure, dependency cleanup, environment fixes, or new features.
 
-Below are ALL the raw project suggestions collected across all evaluation rounds.
+Below are ALL the raw project suggestions collected across all evaluation rounds. Each is tagged with a priority score (0-100) from the judge that created it. Higher priority means more impactful.
 
 ## Raw Project Suggestions
 
@@ -176,10 +178,11 @@ ${allProjectSuggestions || '(No suggestions were collected)'}
 ## Your Task
 
 1. **Read the codebase** to understand the project structure and verify which suggestions are actionable.
-2. **Consolidate** similar or overlapping suggestions into single prompts. Multiple judges may have flagged the same issue from different angles.
+2. **Consolidate** similar or overlapping suggestions into single prompts. Multiple judges flagging the same issue from different angles is a strong signal — treat repeated suggestions as having higher effective priority.
 3. **Discard** suggestions that are no longer relevant (the issue was already fixed, the file doesn't exist, etc.).
-4. **Write clear prompts** — each prompt should be a self-contained description of one change that a coding agent could implement independently, without needing context from other prompts.
-5. **Prioritize** by impact — put the most impactful changes first.
+4. **Ignore low-priority suggestions** — skip suggestions with priority below 20 unless they appeared multiple times across features. Focus your effort on the high-impact changes.
+5. **Write clear prompts** — each prompt should be a self-contained description of one change that a coding agent could implement independently, without needing context from other prompts.
+6. **Prioritize** by impact — put the most impactful changes first, using the priority scores as a guide.
 
 Each prompt should include:
 - A clear title/summary of the change
