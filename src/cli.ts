@@ -11,6 +11,22 @@ import { runEvalbuff } from './run-evalbuff'
 
 const args = process.argv.slice(2)
 
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(`Usage: evalbuff --repo /path/to/repo [options]
+
+Options:
+  --repo <path>              Path to the target repository (required)
+  --n <number>               Number of features to evaluate (default: 20)
+  --parallelism <number>     Max parallel agent runs (default: 10)
+  --loops <number>           Number of optimization loops (default: 3)
+  --init-command <command>   Command to run before each agent run
+  --coding-model <model>     Model for coding agent (default: sonnet)
+  --docs-model <model>       Model for docs agent (default: opus)
+  --cached-features <path>   Path to pre-computed features JSON
+  -h, --help                 Show this help message`)
+  process.exit(0)
+}
+
 const getArg = (name: string, defaultValue?: string): string => {
   const idx = args.indexOf(`--${name}`)
   if (idx >= 0 && idx + 1 < args.length) return args[idx + 1]
