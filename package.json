@@ -2,9 +2,20 @@
   "name": "evalbuff",
   "version": "0.0.1",
   "description": "Automated docs optimization loop: run agent → judge → analyze failures → propose doc edits",
-  "private": true,
   "type": "module",
+  "bin": {
+    "evalbuff": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit -p .",
     "test": "bun test --path-ignore-patterns '**/*.e2e.test.ts'",
     "test:all": "bun test",
@@ -18,18 +29,18 @@
     "perfect": "bun run src/perfect-feature.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.89",
-    "@codebuff/sdk": "^0.10.7",
-    "@openai/codex-sdk": "^0.118.0",
-    "@opentui/core": "^0.1.96",
-    "@opentui/react": "^0.1.96",
-    "react": "^19.2.4",
-    "zod": "^4.2.1"
+    "@anthropic-ai/claude-agent-sdk": "0.2.94",
+    "@codebuff/sdk": "0.10.7",
+    "@openai/codex-sdk": "0.118.0",
+    "zod": "4.3.6"
   },
   "devDependencies": {
+    "@opentui/core": "^0.1.96",
+    "@opentui/react": "^0.1.96",
     "@types/bun": "^1.3.11",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.14",
+    "react": "^19.2.4",
     "typescript": "^5.5.4"
   }
 }
