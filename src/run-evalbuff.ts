@@ -452,7 +452,7 @@ if (import.meta.main) {
   const hasArg = (name: string): boolean => args.includes(`--${name}`)
 
   const repoPath = getArg('repo')
-  const n = parseInt(getArg('n', '5'))
+  const n = parseInt(getArg('n', '20'))
   const parallelism = parseInt(getArg('parallelism', '10'))
   const loops = parseInt(getArg('loops', '3'))
   const initCommand = hasArg('init-command') ? getArg('init-command') : undefined

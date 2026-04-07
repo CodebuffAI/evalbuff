@@ -54,7 +54,7 @@ bun run src/run-evalbuff.ts \
 | Flag | Description |
 |------|-------------|
 | `--repo` | Path to the repo to optimize docs for |
-| `--n` | Number of features to carve per eval round (default: 5) |
+| `--n` | Number of features to carve per eval round (default: 20) |
 | `--parallelism` | How many agent runs to execute in parallel (default: 3) |
 | `--loops` | Number of doc-improvement iterations (default: 3) |
 | `--init-command` | Setup command to run in the repo before each agent run (e.g. `npm install`) |

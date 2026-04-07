@@ -226,7 +226,7 @@ async function runDemo() {
   events.send({
     type: 'run_start',
     repoPath: '/Users/demo/my-project',
-    n: 5,
+    n: 20,
     loops: 2,
     parallelism: 3,
     codingModel: 'sonnet',
