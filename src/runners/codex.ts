@@ -31,7 +31,6 @@ export class CodexRunner implements Runner {
       model: 'gpt-5.4',
       workingDirectory: this.cwd,
       approvalPolicy: 'never',
-      sandboxMode: 'workspace-write',
       webSearchMode: 'live',
     })
 
