@@ -1,6 +1,6 @@
 {
   "name": "evalbuff",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Automated docs optimization loop: run agent → judge → analyze failures → propose doc edits",
   "type": "module",
   "bin": {
