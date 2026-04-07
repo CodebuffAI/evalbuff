@@ -7,7 +7,7 @@ Evalbuff follows a plan → carve → evaluate → refactor loop:
 1. **Plan** — `planFeatures()` in `src/carve-features.ts` uses a Codex agent to scan the target repo and identify 15–25 discrete features that can be cleanly removed.
 2. **Carve** — `carveFeature()` creates an isolated git worktree, runs a Codex agent to remove the feature, and captures the resulting diff and file operations.
 3. **Evaluate** — `runAgentOnCarve()` in `src/eval-runner.ts` clones the repo, applies the carve, copies current docs, runs a coding agent to rebuild the feature, then hands the result to `judgeTaskResult()` in `src/judge.ts`.
-4. **Refactor docs** — `runDocsRefactorAgent()` in `src/docs-refactor.ts` collects judge suggestions and runs a Claude agent in a temp clone to edit `docs/`, `AGENTS.md`, and `CLAUDE.md`.
+4. **Write docs** — `runDocsWriterAgent()` in `src/docs-writer.ts` collects judge suggestions and runs a Claude agent in a temp clone to edit `docs/`, `AGENTS.md`, and `CLAUDE.md`.
 5. **Repeat** — Steps 3–4 loop N times. Each loop also re-judges the baseline diffs with current docs to separate judge recalibration from real agent improvement.
 
 ## Key Modules
@@ -19,7 +19,7 @@ Evalbuff follows a plan → carve → evaluate → refactor loop:
 | `src/eval-helpers.ts` | Git/docs utilities — carve ops, docs sync, diff capture, ground-truth computation |
 | `src/carve-features.ts` | Feature identification and extraction via Codex agents in git worktrees |
 | `src/judge.ts` | Codex-based reviewer that scores agent output with E2E testing |
-| `src/docs-refactor.ts` | Holistic docs editing agent + judge suggestion collector |
+| `src/docs-writer.ts` | Holistic docs editing agent + judge suggestion collector |
 | `src/perfect-feature.ts` | Single-feature iterative optimizer (rebuild → judge → diagnose → update docs) |
 | `src/report.ts` | Persists round results and generates `summary.json` + `report.md` |
 | `src/trace-compressor.ts` | Extracts large tool outputs from traces into content-addressed sidecar files |
@@ -42,7 +42,7 @@ Target repo
   ↓
   ↓ For each improvement loop:
   ↓   collectDocSuggestions() → text
-  ↓   runDocsRefactorAgent() → edits docs in target repo
+  ↓   runDocsWriterAgent() → edits docs in target repo
   ↓   runEvalRound() → new scores
   ↓   runBaselineRejudgeRound() → re-scored baseline
   ↓
@@ -51,7 +51,7 @@ Target repo
 
 ## Temp Clone Pattern
 
-Most workflows (eval, docs refactor, judging) operate in temporary clones, not the original repo. The standard sequence is:
+Most workflows (eval, docs writer, judging) operate in temporary clones, not the original repo. The standard sequence is:
 
 1. `git clone --no-checkout "<repoPath>" "<tempDir>/repo"`
 2. `git checkout <headSha>` (use the HEAD of the source repo)
@@ -59,7 +59,7 @@ Most workflows (eval, docs refactor, judging) operate in temporary clones, not t
 4. Apply carve operations or other setup
 5. `copyDocsIntoRepo(sourceRepoPath, repoDir)` — syncs `docs/`, `AGENTS.md`, `CLAUDE.md` from source into the clone and commits them
 6. Run the agent
-7. For docs-refactor workflows: `syncDocsIntoRepo(repoDir, sourceRepoPath)` to copy results back
+7. For docs-writer workflows: `syncDocsIntoRepo(repoDir, sourceRepoPath)` to copy results back
 
 **Sync-back safety**: The sync-back step (step 7) must run **only after the agent completes successfully**. If the runner throws or the agent aborts, discard the temp clone and leave the source repo untouched. Never place `syncDocsIntoRepo(cloneDir, sourceRepoPath)` on a code path that also handles agent exceptions — partial edits would overwrite the working repo. Pattern: wrap the agent run in try/catch, call `syncDocsIntoRepo` only in the success path, log and skip on failure.
 
@@ -67,7 +67,7 @@ Most workflows (eval, docs refactor, judging) operate in temporary clones, not t
 
 ### Docs Refactor Pattern
 
-`runDocsRefactorAgent()` in `src/docs-refactor.ts` builds a holistic prompt, not a task-specific checklist. The prompt tells the agent to:
+`runDocsWriterAgent()` in `src/docs-writer.ts` builds a holistic prompt, not a task-specific checklist. The prompt tells the agent to:
 1. Read all current docs (`docs/`, `AGENTS.md`, `CLAUDE.md`).
 2. Generalize judge feedback into reusable project patterns — avoid feature-specific examples.
 3. Verify every referenced symbol/path with grep before documenting it.
@@ -110,15 +110,15 @@ Any orchestration command used by a live dashboard must share **one log director
 
 ### Event Types
 
-The `EvalbuffEvent` union in `src/tui/events.ts` defines these event types: `run_start`, `phase_change`, `feature_planned`, `feature_status`, `round_complete`, `docs_refactor`, `run_complete`, and `log`.
+The `EvalbuffEvent` union in `src/tui/events.ts` defines these event types: `run_start`, `phase_change`, `feature_planned`, `feature_status`, `round_complete`, `docs_writer`, `run_complete`, and `log`.
 
 Key types exported from `src/tui/events.ts`:
-- `Phase`: `'planning' | 'carving' | 'evaluating' | 'docs_refactor' | 'complete'`
+- `Phase`: `'planning' | 'carving' | 'evaluating' | 'docs_writer' | 'complete'`
 - `FeatureStatus`: `'pending' | 'carving' | 'carved' | 'carve_failed' | 'agent_running' | 'judging' | 'scored' | 'eval_failed'`
 
 ### Required Emission Points
 
-Every round-scoped `phase_change` event must include `round` (and `loop` when applicable), including for docs-refactor phases. The TUI keeps the last round number in state, so omitting `round` causes the dashboard and `events.jsonl` logs to label the wrong loop.
+Every round-scoped `phase_change` event must include `round` (and `loop` when applicable), including for docs-writer phases. The TUI keeps the last round number in state, so omitting `round` causes the dashboard and `events.jsonl` logs to label the wrong loop.
 
 Required emission points for any orchestration command:
 - Immediately after log-dir creation: `run_start` (with `repoPath`, `logDir`, config fields)

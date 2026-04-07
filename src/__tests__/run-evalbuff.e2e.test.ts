@@ -3,7 +3,7 @@
  *
  * Creates a small test repo with distinct features, then runs the complete
  * eval loop: plan → carve → baseline eval (Claude agent + Codex judge) →
- * improvement loop (docs refactor + re-eval).
+ * improvement loop (docs writer + re-eval).
  *
  * Requires OPENAI_API_KEY and either CLAUDE_CODE_KEY or ANTHROPIC_API_KEY.
  *
@@ -393,7 +393,7 @@ describe('Evalbuff pipeline e2e', () => {
       expect(round1Summary.tasks).toBeArray()
       console.log(`Loop 1 round: avg score ${round1Summary.avgScore.toFixed(1)}, ${round1Summary.tasks.length} tasks`)
 
-      // --- Verify docs refactor artifacts ---
+      // --- Verify docs writer artifacts ---
       const judgeSuggestionsPath = path.join(logDir, 'judge-suggestions-loop-1.txt')
       expect(fs.existsSync(judgeSuggestionsPath)).toBe(true)
 

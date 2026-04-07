@@ -64,7 +64,7 @@ mock.module('../runners/claude', () => ({
 const { runAgentOnCarve } = await import('../eval-runner')
 ```
 
-**Mock scope warning**: `mock.module()` in Bun is process-global for the current test worker and can leak into later test files. Never register top-level mocks for shared modules (e.g., `../carve-features`, `../eval-runner`, `../docs-refactor`) in a file that runs alongside other suites unless the whole file is intentionally isolated. Use this pattern only in orchestration/unit tests that dynamically `await import(...)` the subject after installing mocks in the same file. A stray mock can silently cause other test files to receive a fake module instead of the real one.
+**Mock scope warning**: `mock.module()` in Bun is process-global for the current test worker and can leak into later test files. Never register top-level mocks for shared modules (e.g., `../carve-features`, `../eval-runner`, `../docs-writer`) in a file that runs alongside other suites unless the whole file is intentionally isolated. Use this pattern only in orchestration/unit tests that dynamically `await import(...)` the subject after installing mocks in the same file. A stray mock can silently cause other test files to receive a fake module instead of the real one.
 
 ## Diff Validation
 
@@ -107,13 +107,13 @@ Required cases:
 
 ## Event Stream Testing
 
-For tests of event-emitting orchestration, use `mock.module()` before dynamic `await import(...)` to stub pipeline steps (`planFeatures`, `carveFeature`, `runAgentOnCarve`, `runDocsRefactorAgent`, etc.), then run the orchestrator against a temp repo/log dir and assert that `events.jsonl` exists, parses as one JSON object per line, and contains the expected ordered sequence.
+For tests of event-emitting orchestration, use `mock.module()` before dynamic `await import(...)` to stub pipeline steps (`planFeatures`, `carveFeature`, `runAgentOnCarve`, `runDocsWriterAgent`, etc.), then run the orchestrator against a temp repo/log dir and assert that `events.jsonl` exists, parses as one JSON object per line, and contains the expected ordered sequence.
 
 Include failure-path expectations: carve exceptions should emit `feature_status` with `status: 'carve_failed'`, infrastructure failures should emit `status: 'eval_failed'`, and `events.close()` must flush the file in a `finally` block even when orchestration throws.
 
 ## Full Pipeline E2E Tests
 
-A full-pipeline E2E test calls the real orchestrator (e.g., `runEvalbuff()`) without stubbing internal steps like `planFeatures()`, `carveFeature()`, `runAgentOnCarve()`, or `runDocsRefactorAgent()`. Gate live runs with appropriate skip conditions:
+A full-pipeline E2E test calls the real orchestrator (e.g., `runEvalbuff()`) without stubbing internal steps like `planFeatures()`, `carveFeature()`, `runAgentOnCarve()`, or `runDocsWriterAgent()`. Gate live runs with appropriate skip conditions:
 
 ```ts
 const SKIP = !process.env.OPENAI_API_KEY || !(process.env.CLAUDE_CODE_KEY || process.env.ANTHROPIC_API_KEY)

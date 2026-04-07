@@ -59,7 +59,7 @@ bun run src/run-evalbuff.ts \
 | `--loops` | Number of doc-improvement iterations (default: 3) |
 | `--init-command` | Setup command to run in the repo before each agent run (e.g. `npm install`) |
 | `--coding-model` | Model for the coding agent (default: sonnet) |
-| `--docs-model` | Model for the docs refactor agent (default: opus) |
+| `--docs-model` | Model for the docs writer agent (default: opus) |
 
 ## Testing
 

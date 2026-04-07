@@ -27,9 +27,9 @@ $TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
 │       ├── judging.json               # Re-judged result (trace/diff not re-persisted)
 │       └── score.txt
 │
-├── judge-suggestions-loop-1.txt       # Raw judge suggestions fed to docs refactor
+├── judge-suggestions-loop-1.txt       # Raw judge suggestions fed to docs writer
 ├── docs-diff-loop-1.txt              # Before/after diff of docs for loop 1
-├── docs-state-loop-1.json            # Snapshot of all docs after loop 1 refactor
+├── docs-state-loop-1.json            # Snapshot of all docs after loop 1
 │
 ├── summary.json                       # EvalSummary — the top-level run summary
 └── report.md                          # Human-readable markdown report
@@ -56,10 +56,10 @@ $TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
 
 ## Loop Artifact Timing
 
-Loop artifacts (`judge-suggestions-loop-N.txt`, `docs-diff-loop-N.txt`, `docs-state-loop-N.json`) are written at the **log-dir root** during the docs-refactor step, **before** the corresponding `round-N/` directory is created by `saveRoundResults()`. This means:
+Loop artifacts (`judge-suggestions-loop-N.txt`, `docs-diff-loop-N.txt`, `docs-state-loop-N.json`) are written at the **log-dir root** during the docs-writer step, **before** the corresponding `round-N/` directory is created by `saveRoundResults()`. This means:
 
 - `judge-suggestions-loop-N.txt` is written only when suggestions exist.
-- `docs-diff-loop-N.txt` must always exist after the docs-refactor step — empty string when nothing changed.
+- `docs-diff-loop-N.txt` must always exist after the docs-writer step — empty string when nothing changed.
 - `docs-state-loop-N.json` must always exist — contains the `getDocsSnapshot(repoPath)` result after refactoring.
 
 Loaders and watch-mode UIs must surface loop artifacts independently of `round-N/` directory discovery, since loop files appear first.

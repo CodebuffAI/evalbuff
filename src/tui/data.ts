@@ -151,7 +151,7 @@ export function loadLogDir(logDir: string): LogDirData {
     })
   }
 
-  // Load loop data (docs refactors)
+  // Load loop data (docs writer)
   const loops: LoopData[] = []
   for (let l = 1; l < 20; l++) {
     const suggestionsPath = path.join(logDir, `judge-suggestions-loop-${l}.txt`)

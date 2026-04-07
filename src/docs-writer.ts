@@ -24,12 +24,12 @@ export function collectDocSuggestions(tasks: TaskResult[]): string {
   return sections.join('\n\n')
 }
 
-export async function runDocsRefactorAgent(
+export async function runDocsWriterAgent(
   repoPath: string,
   judgeSuggestions: string,
   model: string,
 ): Promise<void> {
-  console.log(`\n  [DocsRefactor] Running holistic docs refactor...`)
+  console.log(`\n  [DocsWriter] Running docs writer agent...`)
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-docs-'))
   const repoDir = path.join(tempDir, 'repo')
 
@@ -124,7 +124,7 @@ After the sub-agent returns, apply every valid fix it identified by editing the 
     syncDocsIntoRepo(repoDir, repoPath)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.warn(`  [DocsRefactor] Failed: ${msg.slice(0, 200)}`)
+    console.warn(`  [DocsWriter] Failed: ${msg.slice(0, 200)}`)
   } finally {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true })

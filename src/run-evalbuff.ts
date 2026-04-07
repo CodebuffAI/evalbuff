@@ -17,7 +17,7 @@ import os from 'os'
 import path from 'path'
 
 import { planFeatures, carveFeature } from './carve-features'
-import { collectDocSuggestions, runDocsRefactorAgent } from './docs-refactor'
+import { collectDocSuggestions, runDocsWriterAgent } from './docs-writer'
 import { selectRandom, getGroundTruthDiff, getDocsSnapshot, computeDocsDiffText } from './eval-helpers'
 import { runAgentOnCarve, rejudgeBaselineWithCurrentDocs } from './eval-runner'
 import { saveRoundResults, saveBaselineRejudgeResults, saveSummary } from './report'
@@ -350,20 +350,20 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     console.log(`IMPROVEMENT LOOP ${loop}/${opts.loops}`)
     console.log(`${'*'.repeat(60)}`)
 
-    // 4a: Collect judge suggestions and run docs refactor agent
+    // 4a: Collect judge suggestions and run docs writer agent
     const validTasks = previousResults.tasks.filter((t) => t.score >= 0)
     const judgeSuggestions = collectDocSuggestions(validTasks)
 
-    events.send({ type: 'phase_change', phase: 'docs_refactor', loop })
-    events.send({ type: 'docs_refactor', action: 'start', loop, suggestionCount: judgeSuggestions.split('\n').filter(l => l.startsWith('-')).length })
+    events.send({ type: 'phase_change', phase: 'docs_writer', loop })
+    events.send({ type: 'docs_writer', action: 'start', loop, suggestionCount: judgeSuggestions.split('\n').filter(l => l.startsWith('-')).length })
 
-    console.log(`\n--- Step 4a: Docs refactor with judge suggestions ---`)
+    console.log(`\n--- Step 4a: Docs writer with judge suggestions ---`)
     const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
 
     fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${loop}.txt`), judgeSuggestions)
 
-    await runDocsRefactorAgent(opts.repoPath, judgeSuggestions, opts.docsModel)
-    events.send({ type: 'docs_refactor', action: 'complete', loop })
+    await runDocsWriterAgent(opts.repoPath, judgeSuggestions, opts.docsModel)
+    events.send({ type: 'docs_writer', action: 'complete', loop })
 
     // Save docs state and diff for this loop
     const docsAfterRefactor = getDocsSnapshot(opts.repoPath)

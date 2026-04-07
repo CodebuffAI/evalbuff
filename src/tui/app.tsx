@@ -107,7 +107,7 @@ function phaseLabel(phase: Phase, round: number, loop: number): string {
     case 'carving': return 'Carving Features'
     case 'evaluating':
       return round === 0 ? 'Baseline Eval (Round 0)' : `Re-eval (Loop ${loop}, Round ${round})`
-    case 'docs_refactor': return `Docs Refactor (Loop ${loop})`
+    case 'docs_writer': return `Docs Writer (Loop ${loop})`
     case 'complete': return 'Complete'
   }
 }
@@ -118,7 +118,7 @@ function phaseProgress(phase: Phase, round: number, loops: number): number {
   if (phase === 'complete') return 1.0
   if (round === 0) return 0.25
   const loopWeight = 0.65 / (loops || 1)
-  const loopProgress = (round - 1) * loopWeight + (phase === 'docs_refactor' ? 0 : loopWeight * 0.5)
+  const loopProgress = (round - 1) * loopWeight + (phase === 'docs_writer' ? 0 : loopWeight * 0.5)
   return 0.35 + loopProgress
 }
 
@@ -1050,8 +1050,8 @@ export function App({ startView, onLoadRun }: { startView?: View['type']; onLoad
             if (next.logDir) { try { setLogData(loadLogDir(next.logDir)) } catch {} }
             break
 
-          case 'docs_refactor':
-            next.logs.push({ ts, message: event.action === 'start' ? `Docs refactor loop ${event.loop} (${event.suggestionCount || 0} suggestions)` : `Docs refactor loop ${event.loop} done`, level: 'info' })
+          case 'docs_writer':
+            next.logs.push({ ts, message: event.action === 'start' ? `Docs writer loop ${event.loop} (${event.suggestionCount || 0} suggestions)` : `Docs writer loop ${event.loop} done`, level: 'info' })
             break
 
           case 'run_complete':

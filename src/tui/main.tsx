@@ -269,10 +269,10 @@ async function runDemo() {
 
   // Loop 1
   await sleep(500)
-  events.send({ type: 'phase_change', phase: 'docs_refactor', loop: 1 })
-  events.send({ type: 'docs_refactor', action: 'start', loop: 1, suggestionCount: 12 })
+  events.send({ type: 'phase_change', phase: 'docs_writer', loop: 1 })
+  events.send({ type: 'docs_writer', action: 'start', loop: 1, suggestionCount: 12 })
   await sleep(2500)
-  events.send({ type: 'docs_refactor', action: 'complete', loop: 1 })
+  events.send({ type: 'docs_writer', action: 'complete', loop: 1 })
 
   await sleep(300)
   events.send({ type: 'phase_change', phase: 'evaluating', round: 1, loop: 1, detail: 'Re-eval with updated docs' })
@@ -294,10 +294,10 @@ async function runDemo() {
 
   // Loop 2
   await sleep(500)
-  events.send({ type: 'phase_change', phase: 'docs_refactor', loop: 2 })
-  events.send({ type: 'docs_refactor', action: 'start', loop: 2, suggestionCount: 8 })
+  events.send({ type: 'phase_change', phase: 'docs_writer', loop: 2 })
+  events.send({ type: 'docs_writer', action: 'start', loop: 2, suggestionCount: 8 })
   await sleep(2000)
-  events.send({ type: 'docs_refactor', action: 'complete', loop: 2 })
+  events.send({ type: 'docs_writer', action: 'complete', loop: 2 })
 
   await sleep(300)
   events.send({ type: 'phase_change', phase: 'evaluating', round: 2, loop: 2, detail: 'Re-eval with updated docs' })

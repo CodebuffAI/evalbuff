@@ -12,7 +12,7 @@ export type Phase =
   | 'planning'
   | 'carving'
   | 'evaluating'
-  | 'docs_refactor'
+  | 'docs_writer'
   | 'complete'
 
 export type FeatureStatus =
@@ -67,8 +67,8 @@ export interface RoundCompleteEvent {
   scores: Record<string, number>
 }
 
-export interface DocsRefactorEvent {
-  type: 'docs_refactor'
+export interface DocsWriterEvent {
+  type: 'docs_writer'
   action: 'start' | 'complete'
   loop: number
   suggestionCount?: number
@@ -93,7 +93,7 @@ export type EvalbuffEvent =
   | FeaturePlannedEvent
   | FeatureStatusEvent
   | RoundCompleteEvent
-  | DocsRefactorEvent
+  | DocsWriterEvent
   | RunCompleteEvent
   | LogEvent
 

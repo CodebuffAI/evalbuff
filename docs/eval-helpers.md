@@ -6,7 +6,7 @@
 
 - **`copyDocsIntoRepo(sourceRepoPath, targetRepoPath)`** — Syncs `docs/*.md`, `AGENTS.md`, and `CLAUDE.md` from source to target, removes stale files from target, and creates a git commit with message `evalbuff: pre-load docs`. This is the standard way to inject docs into a temp clone before running an agent.
 
-- **`syncDocsIntoRepo(sourceRepoPath, targetRepoPath)`** — Lower-level: copies doc files without committing. Returns an array of changed paths. Used by docs-refactor workflows that need to sync in both directions (before and after the agent runs).
+- **`syncDocsIntoRepo(sourceRepoPath, targetRepoPath)`** — Lower-level: copies doc files without committing. Returns an array of changed paths. Used by docs-writer workflows that need to sync in both directions (before and after the agent runs).
 
 - **`getDocsSnapshot(repoPath)`** — Returns `Record<string, string>` of all doc file contents (`docs/**/*.md`, `AGENTS.md`, `CLAUDE.md`). Reads working-tree files, not just committed HEAD.
 
