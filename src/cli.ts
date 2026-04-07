@@ -21,7 +21,7 @@ if (args.includes('--version') || args.includes('-V')) {
   process.exit(0)
 }
 
-if (args.includes('--help') || args.includes('-h')) {
+if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
   console.log(`Usage: evalbuff --repo /path/to/repo [options]
 
 Options:
