@@ -24,6 +24,22 @@ export function collectDocSuggestions(tasks: TaskResult[]): string {
   return sections.join('\n\n')
 }
 
+export function collectProjectSuggestions(tasks: TaskResult[]): string {
+  const sections: string[] = []
+
+  for (const task of tasks) {
+    const suggestions = task.judging.projectSuggestions
+    if (!suggestions || suggestions.length === 0) continue
+
+    sections.push(
+      `### ${task.featureId} (score: ${task.score.toFixed(1)}/10)\n` +
+      suggestions.map((s) => `- ${s}`).join('\n'),
+    )
+  }
+
+  return sections.join('\n\n')
+}
+
 export async function runDocsWriterAgent(
   repoPath: string,
   judgeSuggestions: string,
@@ -125,6 +141,98 @@ After the sub-agent returns, apply every valid fix it identified by editing the 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.warn(`  [DocsWriter] Failed: ${msg.slice(0, 200)}`)
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+}
+
+const PROMPT_WRITER_RESULT_FILE = 'evalbuff-project-prompts.json'
+
+export async function runPromptWriterAgent(
+  repoPath: string,
+  allProjectSuggestions: string,
+  model: string,
+): Promise<string[]> {
+  console.log(`\n  [PromptWriter] Running prompt writer agent...`)
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-prompts-'))
+  const repoDir = path.join(tempDir, 'repo')
+
+  const prompt = `You are a senior engineer who has been given a set of project improvement suggestions collected from multiple code review sessions. Your job is to consolidate these into a set of clear, independent prompts that another coding agent could follow to improve the project.
+
+## Context
+
+An automated evaluation system ran a coding agent on multiple tasks in this repository, and judges reviewed the results. Along with documentation suggestions, the judges also identified ways the **project itself** could be improved — refactors, dead code removal, test infrastructure, dependency cleanup, environment fixes, or new features.
+
+Below are ALL the raw project suggestions collected across all evaluation rounds.
+
+## Raw Project Suggestions
+
+${allProjectSuggestions || '(No suggestions were collected)'}
+
+## Your Task
+
+1. **Read the codebase** to understand the project structure and verify which suggestions are actionable.
+2. **Consolidate** similar or overlapping suggestions into single prompts. Multiple judges may have flagged the same issue from different angles.
+3. **Discard** suggestions that are no longer relevant (the issue was already fixed, the file doesn't exist, etc.).
+4. **Write clear prompts** — each prompt should be a self-contained description of one change that a coding agent could implement independently, without needing context from other prompts.
+5. **Prioritize** by impact — put the most impactful changes first.
+
+Each prompt should include:
+- A clear title/summary of the change
+- What files/modules are affected
+- What the current state is and what's wrong with it
+- What the desired end state looks like
+- Any specific implementation guidance
+
+Write the result as a JSON array of strings to \`${PROMPT_WRITER_RESULT_FILE}\` in the current directory. Each string is one complete prompt.
+
+Example output format:
+\`\`\`json
+[
+  "Title: Consolidate error handling utilities\\n\\nCurrently src/middleware/error.ts and src/utils/errors.ts both define error formatting logic, which confuses agents about which to import.\\n\\nChange: Move all error utilities into src/utils/errors.ts. Update src/middleware/error.ts to re-export from utils. Update all imports across the codebase.\\n\\nEnd state: One canonical location for error handling (src/utils/errors.ts), with the middleware file being a thin re-export layer.",
+  "Title: Add integration test harness for API routes\\n\\nCurrently there's no way to test API routes end-to-end without manually starting the dev server.\\n\\nChange: Create tests/helpers/server.ts that exports a startTestServer() function which starts the app on a random port, seeds test data, and returns { url, cleanup }. Add one example test in tests/integration/routes.test.ts that uses it.\\n\\nEnd state: Agents and reviewers can run 'bun test tests/integration/' to verify route changes work end-to-end."
+]
+\`\`\`
+
+If no suggestions are actionable after verification, write an empty array \`[]\`.
+
+IMPORTANT: You MUST write the result file. This is the only output that gets captured.`
+
+  try {
+    execSync(`git clone --no-checkout "${repoPath}" "${repoDir}"`, { stdio: 'ignore' })
+    const headSha = execSync('git rev-parse HEAD', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+    }).trim()
+    execSync(`git checkout ${headSha}`, { cwd: repoDir, stdio: 'ignore' })
+
+    const runner = new ClaudeRunner(repoDir, {}, model, 'high')
+    await runner.run(prompt)
+
+    // Read the result file
+    const resultPath = path.join(repoDir, PROMPT_WRITER_RESULT_FILE)
+    if (fs.existsSync(resultPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(resultPath, 'utf-8'))
+        if (Array.isArray(parsed)) {
+          console.log(`  [PromptWriter] Generated ${parsed.length} project improvement prompts`)
+          return parsed.filter((p): p is string => typeof p === 'string')
+        }
+      } catch (parseErr) {
+        console.warn(`  [PromptWriter] Failed to parse result: ${parseErr}`)
+      }
+    } else {
+      console.warn(`  [PromptWriter] No result file written`)
+    }
+    return []
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`  [PromptWriter] Failed: ${msg.slice(0, 200)}`)
+    return []
   } finally {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true })

@@ -31,6 +31,7 @@ export interface EvalSummary {
   // scoreProgression[0]. A flat or rising line here with a rising agent line
   // suggests the docs are improving the agent beyond just judge recalibration.
   baselineRejudgeProgression?: number[]
+  projectPrompts?: string[]
 }
 
 export interface EvalOptions {
@@ -115,6 +116,7 @@ export function saveSummary(
   roundResults: RoundResult[],
   opts: EvalOptions,
   baselineRejudgeResults: RoundResult[] = [],
+  projectPrompts: string[] = [],
 ): void {
   fs.writeFileSync(path.join(logDir, 'summary.json'), JSON.stringify(summary, null, 2))
 
@@ -293,6 +295,14 @@ export function saveSummary(
         push('')
       }
 
+      // Project suggestions
+      const projSuggestions = task.judging.projectSuggestions
+      if (projSuggestions && projSuggestions.length > 0) {
+        push('**Project suggestions:**')
+        for (const s of projSuggestions) push(`- ${s}`)
+        push('')
+      }
+
       push(`**Cost:** $${task.costEstimate.toFixed(2)}`, '')
     }
 
@@ -322,6 +332,16 @@ export function saveSummary(
           push('```', '')
         }
       }
+    }
+  }
+
+  // --- Project improvement prompts ---
+  if (projectPrompts.length > 0) {
+    push('## Project Improvement Prompts', '')
+    push('_These prompts describe independent changes to improve the project itself (not just docs). Each can be given to a coding agent as a standalone task._', '')
+    for (let i = 0; i < projectPrompts.length; i++) {
+      push(`### Prompt ${i + 1}`, '')
+      push(projectPrompts[i], '')
     }
   }
 

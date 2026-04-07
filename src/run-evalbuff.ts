@@ -17,7 +17,7 @@ import os from 'os'
 import path from 'path'
 
 import { planFeatures, carveFeature } from './carve-features'
-import { collectDocSuggestions, runDocsWriterAgent } from './docs-writer'
+import { collectDocSuggestions, collectProjectSuggestions, runDocsWriterAgent, runPromptWriterAgent } from './docs-writer'
 import { selectRandom, getGroundTruthDiff, getDocsSnapshot, computeDocsDiffText } from './eval-helpers'
 import { runAgentOnCarve, rejudgeBaselineWithCurrentDocs } from './eval-runner'
 import { saveRoundResults, saveBaselineRejudgeResults, saveSummary } from './report'
@@ -343,6 +343,11 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const roundResults: RoundResult[] = [baseline]
   const baselineRejudgeResults: RoundResult[] = []
   let previousResults = baseline
+  const allProjectSuggestionSections: string[] = []
+
+  // Collect project suggestions from baseline
+  const baselineProjectSuggestions = collectProjectSuggestions(baseline.tasks.filter(t => t.score >= 0))
+  if (baselineProjectSuggestions) allProjectSuggestionSections.push(`## Baseline Round\n\n${baselineProjectSuggestions}`)
 
   // --- Step 4: Improvement loops ---
   for (let loop = 1; loop <= opts.loops; loop++) {
@@ -392,10 +397,29 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     saveBaselineRejudgeResults(logDir, rejudged)
     baselineRejudgeResults.push(rejudged)
 
+    // Collect project suggestions from this loop
+    const loopProjectSuggestions = collectProjectSuggestions(results.tasks.filter(t => t.score >= 0))
+    if (loopProjectSuggestions) allProjectSuggestionSections.push(`## Loop ${loop}\n\n${loopProjectSuggestions}`)
+
     console.log(
       `\n  Loop ${loop} complete. Score: ${baseline.avgScore.toFixed(1)} → ${results.avgScore.toFixed(1)}` +
       ` (baseline rejudged: ${baseline.avgScore.toFixed(1)} → ${rejudged.avgScore.toFixed(1)})`,
     )
+  }
+
+  // --- Step 5: Run prompt writer to consolidate project suggestions ---
+  let projectPrompts: string[] = []
+  const allProjectSuggestionsText = allProjectSuggestionSections.join('\n\n')
+  if (allProjectSuggestionsText.trim()) {
+    console.log(`\n${'='.repeat(60)}`)
+    console.log('STEP 5: Generating project improvement prompts...')
+    console.log(`${'='.repeat(60)}`)
+
+    fs.writeFileSync(path.join(logDir, 'project-suggestions-raw.txt'), allProjectSuggestionsText)
+    projectPrompts = await runPromptWriterAgent(opts.repoPath, allProjectSuggestionsText, opts.docsModel)
+    if (projectPrompts.length > 0) {
+      fs.writeFileSync(path.join(logDir, 'project-prompts.json'), JSON.stringify(projectPrompts, null, 2))
+    }
   }
 
   // --- Summary ---
@@ -415,9 +439,10 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     totalCost,
     scoreProgression: roundResults.map((r) => r.avgScore),
     baselineRejudgeProgression: baselineRejudgeResults.map((r) => r.avgScore),
+    projectPrompts,
   }
 
-  saveSummary(logDir, summary, roundResults, opts, baselineRejudgeResults)
+  saveSummary(logDir, summary, roundResults, opts, baselineRejudgeResults, projectPrompts)
 
   events.send({
     type: 'run_complete',
@@ -434,6 +459,9 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   console.log(`  Features: ${features.length}`)
   console.log(`  Total cost: $${totalCost.toFixed(2)}`)
   console.log(`  Score progression: ${summary.scoreProgression.map((s) => s.toFixed(1)).join(' → ')}`)
+  if (projectPrompts.length > 0) {
+    console.log(`  Project improvement prompts: ${projectPrompts.length}`)
+  }
   console.log(`  Logs: ${logDir}`)
   console.log(`  Report: ${path.join(logDir, 'report.md')}`)
 }

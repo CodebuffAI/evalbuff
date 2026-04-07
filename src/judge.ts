@@ -41,6 +41,12 @@ export const JudgingResultSchema = z.object({
     .describe(
       'Informal recommendations for documentation changes to help future coding agents AND future reviewers'
     ),
+  projectSuggestions: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Suggestions for improving the project itself — refactors, dead code removal, test infrastructure, dependency cleanup, or new features that would make the codebase easier for agents to work with'
+    ),
 })
 
 export type JudgingResult = z.infer<typeof JudgingResultSchema>
@@ -129,6 +135,11 @@ After your review and testing, write your judgment to the file \`${RESULT_FILE_N
   "docSuggestions": [
     "Update docs/architecture.md: Add a section 'Route Registration'. All API routes must be registered in src/routes/index.ts by calling registerRoute(). The route handler file goes in src/routes/<name>.ts and must export a default function with signature (req: Request, res: Response) => void. Without registration the route silently 404s — there is no auto-discovery.",
     "Create docs/patterns/error-handling.md: All async route handlers in src/routes/ must be wrapped with withErrorHandler() from src/middleware/error.ts. This wrapper catches thrown errors and returns a standardized { error: string, code: number } JSON response. Without it, unhandled rejections crash the server. Example: export default withErrorHandler(async (req, res) => { ... })"
+  ],
+  "projectSuggestions": [
+    "Refactor: The error handling middleware in src/middleware/error.ts duplicates logic from src/utils/errors.ts. Consolidating these into a single module would reduce confusion for agents trying to understand which error utility to use.",
+    "Test infrastructure: There are no integration tests for the API routes. Adding a test harness that spins up the dev server and runs requests against it would catch the class of bugs where routes 404 due to missing registration.",
+    "Dead code: src/utils/legacy-auth.ts is imported nowhere and appears to be left over from a previous auth system. Removing it would reduce noise for agents scanning the codebase."
   ]
 }
 \`\`\`
@@ -165,6 +176,30 @@ Guidelines:
 - For reviewer suggestions, focus on reusable testing strategies — what to spin up, what to seed, what to assert, what scripts to write. These help future judges verify correctness beyond just reading the diff.
 - If the agent scored 9+, suggestions are optional.
 - If weaknesses are too task-specific to generalize, leave docSuggestions empty.
+
+## Project Improvement Suggestions
+
+Beyond documentation, suggest changes to the **project itself** that would make the codebase easier for coding agents to work with. These are changes to source code, tests, dependencies, or infrastructure — not docs.
+
+Think about what structural improvements would have helped the agent succeed. Add suggestions to the \`projectSuggestions\` array. Categories to consider:
+
+1. **Refactors** — confusing code structure, duplicated logic, or misleading abstractions that tripped up the agent. Suggest a specific refactor that would simplify things.
+2. **Dead code / unnecessary dependencies** — unused files, exports, or packages that add noise and confuse agents scanning the codebase.
+3. **Test infrastructure** — missing test harnesses, fixtures, or scripts that would let agents (and reviewers) verify changes end-to-end. E.g., "Add a test helper that spins up the dev server and seeds test data."
+4. **Environment / build** — confusing build steps, missing setup scripts, or environment issues that caused the agent to waste time.
+5. **Feature ideas** — small features or utilities that would simplify common patterns agents need to implement.
+
+Each suggestion should be a self-contained description of one change, with enough detail that a coding agent could implement it independently:
+- What to change and where (file paths, modules)
+- Why it would help (what problem it solves)
+- What the end state should look like
+
+Good project suggestion:
+- "Refactor: src/middleware/error.ts and src/utils/errors.ts both define error formatting logic. Consolidate into src/utils/errors.ts and re-export from middleware. This would eliminate the confusion the agent had about which module to import for error handling."
+- "Test infrastructure: Add a test helper in tests/helpers/server.ts that starts the dev server on a random port, seeds the DB, and returns a cleanup function. Currently every agent that needs E2E testing has to figure out server startup from scratch."
+- "Dead code: src/utils/legacy-auth.ts is imported nowhere. Remove it to reduce noise."
+
+If the agent scored 9.5+ or no project-level issues were observed, leave projectSuggestions empty.
 
 IMPORTANT: You MUST write the result file. This is the only way your review gets recorded. Do it as your very last action.`
 }
