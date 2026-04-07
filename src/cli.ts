@@ -7,9 +7,19 @@
  *            [--init-command "npm install"] [--coding-model sonnet] [--docs-model opus]
  *            [--cached-features /path/to/features.json]
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { resolve, dirname } from 'node:path'
 import { runEvalbuff } from './run-evalbuff'
 
 const args = process.argv.slice(2)
+
+if (args.includes('--version') || args.includes('-V')) {
+  const pkgPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+  const { version } = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+  console.log(version)
+  process.exit(0)
+}
 
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`Usage: evalbuff --repo /path/to/repo [options]
@@ -23,6 +33,7 @@ Options:
   --coding-model <model>     Model for coding agent (default: sonnet)
   --docs-model <model>       Model for docs agent (default: opus)
   --cached-features <path>   Path to pre-computed features JSON
+  -V, --version              Show version number
   -h, --help                 Show this help message`)
   process.exit(0)
 }
