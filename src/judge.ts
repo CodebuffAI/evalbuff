@@ -303,11 +303,18 @@ export async function judgeTaskResult(
     docsDir: fs.existsSync(path.join(repoDir, 'docs')) ? repoDir : undefined,
   })
 
-  const result = await runCodexReviewer(prompt, repoDir)
-  if (result) return result
+  const maxRetries = 3
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const result = await runCodexReviewer(prompt, repoDir)
+    if (result) return result
+    if (attempt < maxRetries) {
+      console.warn(`[Judge] Attempt ${attempt}/${maxRetries} failed, retrying...`)
+    }
+  }
 
+  console.error(`[Judge] All ${maxRetries} attempts failed`)
   return {
-    analysis: 'Error: reviewer agent failed to provide results',
+    analysis: 'Error: reviewer agent failed to provide results after retries',
     strengths: [],
     weaknesses: ['Reviewer agent failed'],
     e2eTestsPerformed: [],
