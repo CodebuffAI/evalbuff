@@ -14,8 +14,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "npm run build",
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-esm-imports.mjs",
+    "build:smoke": "npm run build && node dist/cli.js --help",
+    "prepublishOnly": "npm run build:smoke",
     "typecheck": "tsc --noEmit -p .",
     "test": "bun test --path-ignore-patterns '**/*.e2e.test.ts'",
     "test:all": "bun test",
