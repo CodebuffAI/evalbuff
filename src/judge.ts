@@ -38,7 +38,9 @@ export const JudgingResultSchema = z.object({
   docSuggestions: z
     .array(z.string())
     .optional()
-    .describe('Informal recommendations for documentation changes to help future agents'),
+    .describe(
+      'Informal recommendations for documentation changes to help future coding agents AND future reviewers'
+    ),
 })
 
 export type JudgingResult = z.infer<typeof JudgingResultSchema>
@@ -135,22 +137,32 @@ All scores are 0-10. The e2eScore specifically measures how well the change work
 
 ## Documentation Suggestions
 
-Based on what you learned from reviewing and testing this code, suggest documentation changes that would help a coding agent do better on FUTURE similar tasks. Add these to the \`docSuggestions\` array.
+Based on what you learned from reviewing and testing this code, suggest documentation changes that would help in two ways:
+
+1. **Help coding agents** do better on FUTURE similar tasks — patterns, conventions, gotchas they should know.
+2. **Help future reviewers** (like you) better evaluate changes — testing strategies that worked, verification processes, scripts or commands that reliably catch issues, ways to set up end-to-end testing for this area of the codebase.
+
+Add all suggestions to the \`docSuggestions\` array.
 
 Each suggestion is a string that specifies which file to create or update AND includes the full substantive content — file paths, function signatures, conventions, examples, gotchas. A separate agent will read your suggestions and edit the actual doc files, so give it everything it needs without having to re-investigate the codebase.
 
-Good suggestion (has the meat):
+Good suggestion for coding agents (has the meat):
 - "Create docs/patterns/error-handling.md: All async route handlers in src/routes/ must be wrapped with withErrorHandler() from src/middleware/error.ts. This wrapper catches thrown errors and returns a standardized { error: string, code: number } JSON response. Without it, unhandled rejections crash the server. Example: export default withErrorHandler(async (req, res) => { ... })"
 - "Update docs/architecture.md, section 'Data Layer': Add that all database queries go through src/db/queries.ts, never raw SQL in route handlers. The query functions handle connection pooling and return typed results. Import pattern: import { getUser, createUser } from '@/db/queries'"
 
+Good suggestion for reviewers (testing strategies, verification):
+- "Update docs/testing.md, section 'E2E Verification': To test API route changes end-to-end, write a temporary script that starts the dev server with 'bun run dev', waits for port 3000, then curls each affected endpoint. Example: const proc = Bun.spawn(['bun', 'run', 'dev']); await fetch('http://localhost:3000/api/health'); // verify response shape"
+- "Create docs/testing/payment-flow.md: Testing payment-related changes requires seeding the test DB with a user and subscription via src/db/seed.ts, then hitting POST /api/checkout with a Stripe test token. The key assertion is that the webhook handler at src/routes/webhook.ts correctly updates user.plan — check the DB directly after the webhook fires."
+
 Bad suggestion (too vague, forces the refactorer to figure it out):
 - "Add something about error handling conventions"
-- "Update the architecture docs to mention the database layer"
+- "Document how to test this area"
 
 Guidelines:
 - Focus on GENERAL PATTERNS, not task-specific fixes.
 - Include concrete file paths, function names, type signatures, import patterns, and examples.
 - Describe edits to existing docs when they're incomplete or wrong, not just new docs.
+- For reviewer suggestions, focus on reusable testing strategies — what to spin up, what to seed, what to assert, what scripts to write. These help future judges verify correctness beyond just reading the diff.
 - If the agent scored 9+, suggestions are optional.
 - If weaknesses are too task-specific to generalize, leave docSuggestions empty.
 
@@ -160,7 +172,7 @@ IMPORTANT: You MUST write the result file. This is the only way your review gets
 async function runCodexReviewer(
   prompt: string,
   cwd: string,
-  timeoutMs: number = 30 * 60 * 1000,
+  timeoutMs: number = 40 * 60 * 1000,
 ): Promise<JudgingResult | null> {
   const codex = new Codex({
     apiKey: process.env.OPENAI_API_KEY,
@@ -303,7 +315,7 @@ export async function judgeTaskResult(
     docsDir: fs.existsSync(path.join(repoDir, 'docs')) ? repoDir : undefined,
   })
 
-  const maxRetries = 3
+  const maxRetries = 2
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const result = await runCodexReviewer(prompt, repoDir)
     if (result) return result

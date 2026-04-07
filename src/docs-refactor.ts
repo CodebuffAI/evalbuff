@@ -37,7 +37,7 @@ export async function runDocsRefactorAgent(
 
 ## Goal
 
-The purpose of these docs is to help a coding agent successfully build NEW features it has never seen before. The docs should teach the agent how the project works — its architecture, patterns, conventions, and rules — so it can confidently build anything, not just reconstruct specific existing features.
+The purpose of these docs is to help a coding agent successfully build NEW features it has never seen before, AND to help reviewers verify that changes actually work. The docs should teach the agent how the project works — its architecture, patterns, conventions, and rules — so it can confidently build anything, not just reconstruct specific existing features. They should also document testing strategies, verification processes, and end-to-end testing approaches that help reviewers evaluate changes beyond just reading the diff.
 
 ## Judge Suggestions
 
@@ -47,7 +47,7 @@ ${judgeSuggestions || '(No suggestions were made)'}
 
 ## What to do
 
-1. **Extract general patterns** — each judge suggestion reflects a specific failure, but your job is to identify the underlying pattern or convention that would prevent a whole class of similar failures. Ask: "What general rule would help an agent get this right for ANY feature?"
+1. **Extract general patterns** — each judge suggestion reflects a specific failure, but your job is to identify the underlying pattern or convention that would prevent a whole class of similar failures. Ask: "What general rule would help an agent get this right for ANY feature?" Some suggestions are about testing/verification strategies for reviewers — treat those as equally important and document them in the appropriate docs (e.g., docs/testing.md or similar).
 2. **Do NOT reference specific features** — never mention a specific feature, component, or endpoint by name as an example of what to build. Instead, document the pattern it follows. For example, instead of "the UserProfile component fetches data in useEffect", write "components in this project fetch data using useEffect on mount, following the pattern in src/hooks/".
 3. **Document architecture and data flow** — describe how the project is structured, how data flows through it, and where new code should be placed. These are the things an agent building something new needs most.
 4. **Edit existing docs** — when a suggestion maps to an existing doc, make fine-grained edits rather than rewriting from scratch.
