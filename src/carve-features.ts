@@ -69,7 +69,6 @@ export async function planFeatures(repoPath: string): Promise<CarvePlan> {
     model: 'gpt-5.4',
     workingDirectory: repoPath,
     approvalPolicy: 'never',
-    sandboxMode: 'read-only',
     webSearchMode: 'live',
     modelReasoningEffort: 'high',
   })
@@ -183,7 +182,6 @@ export async function carveFeature(
       model: 'gpt-5.4',
       workingDirectory: worktreePath,
       approvalPolicy: 'never',
-      sandboxMode: 'workspace-write',
       webSearchMode: 'live',
       modelReasoningEffort: 'high',
     })
