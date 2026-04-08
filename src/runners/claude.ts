@@ -32,8 +32,6 @@ export class ClaudeRunner implements Runner {
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
 
-    console.log(`[ClaudeRunner] Running with model ${this.model} in ${this.cwd}`)
-
     const session = query({
       prompt,
       options: {
@@ -60,7 +58,6 @@ export class ClaudeRunner implements Runner {
           for (const block of content) {
             if (block.type === 'text') {
               steps.push({ type: 'text', text: block.text })
-              process.stdout.write(block.text)
             } else if (block.type === 'tool_use') {
               steps.push({
                 type: 'tool_call',

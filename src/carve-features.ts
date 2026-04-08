@@ -74,8 +74,6 @@ export async function planFeatures(repoPath: string): Promise<CarvePlan> {
     modelReasoningEffort: 'high',
   })
 
-  console.log('Planning features to carve...')
-
   const prompt = `You are an expert software architect. Analyze this codebase to identify 15-25 discrete, self-contained features that can be cleanly "carved out" (deleted) and used as coding evaluation tasks.
 
 Explore the codebase thoroughly — read the file tree, key config files, entry points, and source files to understand the architecture.
@@ -138,18 +136,14 @@ You MUST write the result file as your last action.`
     // Try to extract from the agent's final response
     const jsonMatch = result.finalResponse.match(/\{[\s\S]*"candidates"[\s\S]*\}/)
     if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]) as CarvePlan
-      console.log(`Identified ${parsed.candidates.length} carve candidates (from response)`)
-      return parsed
+      return JSON.parse(jsonMatch[0]) as CarvePlan
     }
     throw new Error('Codex agent did not produce a result file')
   }
 
   try {
     const raw = fs.readFileSync(resultPath, 'utf-8')
-    const parsed = JSON.parse(raw) as CarvePlan
-    console.log(`Identified ${parsed.candidates.length} carve candidates`)
-    return parsed
+    return JSON.parse(raw) as CarvePlan
   } finally {
     fs.rmSync(resultPath, { force: true })
   }
@@ -161,8 +155,6 @@ export async function carveFeature(
   repoPath: string,
   candidate: CarveCandidate,
 ): Promise<CarvedFeature | null> {
-  console.log(`  Carving feature: ${candidate.id}...`)
-
   // Save original files before carving
   const originalFiles: Record<string, string> = {}
   for (const filePath of candidate.files) {
@@ -234,14 +226,11 @@ Do NOT create any result files — just make the edits directly.`
     })
 
     if (!diff.trim()) {
-      console.warn(`  No changes made for ${candidate.id}`)
       return null
     }
 
     // Build operations from the actual git diff
     const operations = buildOperationsFromDiff(worktreePath, repoPath, candidate.files)
-
-    console.log(`  Carved ${candidate.id}: ${operations.length} file operations, ${diff.split('\n').length} diff lines`)
 
     return {
       id: candidate.id,
@@ -252,9 +241,7 @@ Do NOT create any result files — just make the edits directly.`
       operations,
       diff,
     }
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error)
-    console.error(`  Failed to carve ${candidate.id}: ${msg.slice(0, 200)}`)
+  } catch {
     return null
   } finally {
     // Clean up worktree and branch
@@ -316,19 +303,11 @@ export async function carveFeatures(
 ): Promise<CarveResult> {
   const { count = 10, outputPath } = options
 
-  console.log(`\nCarving features from: ${repoPath}`)
-  console.log(`Target: ${count} features\n`)
+  console.log(`Carving features from: ${repoPath} (target: ${count})`)
 
   // Phase 1: Plan
   const plan = await planFeatures(repoPath)
-
-  console.log(`\nPlanning complete. Reasoning:\n${plan.reasoning}\n`)
-  console.log('Candidates:')
-  for (const c of plan.candidates) {
-    console.log(`  ${c.id} (${c.complexity}): ${c.name}`)
-    console.log(`    Prompt: ${c.prompt}`)
-    console.log(`    Files: ${c.files.join(', ')}`)
-  }
+  console.log(`Found ${plan.candidates.length} candidates`)
 
   // Select top N candidates (prefer medium complexity)
   const ranked = [...plan.candidates].sort((a, b) => {
@@ -337,21 +316,15 @@ export async function carveFeatures(
   })
   const selected = ranked.slice(0, count)
 
-  console.log(`\nSelected ${selected.length} features for carving:\n`)
-
   // Phase 2: Carve each feature
   const features: CarvedFeature[] = []
   for (const candidate of selected) {
-    try {
-      const carved = await carveFeature(repoPath, candidate)
-      if (carved) {
-        features.push(carved)
-        console.log(`  Done: ${carved.id} — ${carved.operations.length} file operations`)
-      }
-    } catch (error) {
-      console.error(`  Failed: ${candidate.id}:`, error)
+    const carved = await carveFeature(repoPath, candidate)
+    if (carved) {
+      features.push(carved)
     }
   }
+  console.log(`Carved ${features.length}/${selected.length} features`)
 
   const result: CarveResult = {
     repoPath,

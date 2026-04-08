@@ -34,8 +34,6 @@ export class CodexRunner implements Runner {
       webSearchMode: 'live',
     })
 
-    console.log(`[CodexRunner] Starting thread in ${this.cwd}`)
-
     const { events } = await thread.runStreamed(prompt)
     let usage: Usage | null = null
 
@@ -48,10 +46,7 @@ export class CodexRunner implements Runner {
           usage = event.usage
           break
         case 'turn.failed':
-          console.error(`[CodexRunner] Turn failed: ${event.error.message}`)
-          break
         case 'error':
-          console.error(`[CodexRunner] Error: ${event.message}`)
           break
       }
     }
@@ -81,7 +76,6 @@ function processItem(item: ThreadItem, steps: AgentStep[]): void {
   switch (item.type) {
     case 'agent_message':
       steps.push({ type: 'text', text: item.text })
-      process.stdout.write(item.text)
       break
     case 'command_execution':
       steps.push({
@@ -138,7 +132,6 @@ function processItem(item: ThreadItem, steps: AgentStep[]): void {
       // Skip todo lists
       break
     case 'error':
-      console.error(`[CodexRunner] Item error: ${item.message}`)
       break
   }
 }

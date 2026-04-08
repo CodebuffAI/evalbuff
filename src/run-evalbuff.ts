@@ -20,6 +20,11 @@ import { planFeatures, carveFeature } from './carve-features'
 import { collectDocSuggestions, collectProjectSuggestions, runDocsWriterAgent, runPromptWriterAgent } from './docs-writer'
 import { selectRandom, getGroundTruthDiff, getDocsSnapshot, computeDocsDiffText } from './eval-helpers'
 import { runAgentOnCarve, rejudgeBaselineWithCurrentDocs } from './eval-runner'
+import {
+  startSpinner, updateSpinner, stopSpinner,
+  printHeader, printRoundScores, printBaselineRejudge,
+  printScoreTable, printProjectPrompts, printFinalSummary,
+} from './log'
 import { saveRoundResults, saveBaselineRejudgeResults, saveSummary } from './report'
 import { events } from './tui/events'
 
@@ -47,10 +52,12 @@ async function runEvalRound(
   groundTruthDiffs: Map<string, string>,
   opts: EvalbuffOptions,
   round: number,
+  baselineAvg?: number,
 ): Promise<RoundResult> {
-  console.log(`\n${'='.repeat(60)}`)
-  console.log(`ROUND ${round} — Evaluating ${features.length} features (parallelism=${opts.parallelism})`)
-  console.log(`${'='.repeat(60)}`)
+  const label = round === 0 ? 'Baseline' : `Round ${round}`
+  let completed = 0
+
+  startSpinner(`${label}: evaluating 0/${features.length} features...`)
 
   // Run features with bounded concurrency
   const results: TaskResult[] = []
@@ -97,6 +104,8 @@ async function runEvalRound(
         }
         events.send({ type: 'feature_status', featureId: feature.id, status: 'eval_failed', detail: msg.slice(0, 200) })
       }
+      completed++
+      updateSpinner(`${label}: ${completed}/${features.length} features evaluated`)
     }
   }
 
@@ -104,19 +113,15 @@ async function runEvalRound(
     Array.from({ length: Math.min(opts.parallelism, features.length) }, () => worker()),
   )
 
+  stopSpinner()
+
   const valid = results.filter((r) => r.score >= 0)
   const avgScore = valid.length > 0
     ? valid.reduce((a, r) => a + r.score, 0) / valid.length
     : 0
   const totalCost = results.reduce((a, r) => a + r.costEstimate, 0)
 
-  console.log(`\nRound ${round} results:`)
-  for (const r of results) {
-    const status = r.score >= 0 ? `${r.score.toFixed(1)}/10` : 'FAILED'
-    console.log(`  ${r.featureId}: ${status}`)
-  }
-  console.log(`  Average: ${avgScore.toFixed(1)}/10 (${valid.length}/${results.length} succeeded)`)
-  console.log(`  Cost: $${totalCost.toFixed(2)}`)
+  printRoundScores(label, results, avgScore, totalCost, baselineAvg)
 
   events.send({
     type: 'round_complete',
@@ -143,9 +148,8 @@ async function runBaselineRejudgeRound(
   opts: EvalbuffOptions,
   loop: number,
 ): Promise<RoundResult> {
-  console.log(`\n${'-'.repeat(60)}`)
-  console.log(`BASELINE REJUDGE (loop ${loop}) — Re-scoring ${baseline.tasks.length} baseline diffs with current docs`)
-  console.log(`${'-'.repeat(60)}`)
+  let completed = 0
+  startSpinner(`Baseline rejudge: 0/${baseline.tasks.length} re-scored...`)
 
   const featureById = new Map(features.map(f => [f.id, f]))
   const results: TaskResult[] = []
@@ -157,10 +161,10 @@ async function runBaselineRejudgeRound(
       const { baselineTask, i } = queue[next++]
       const feature = featureById.get(baselineTask.featureId)
 
-      // If baseline task itself failed (infra error) or we can't find the feature,
-      // carry the failure forward unchanged.
       if (!feature || baselineTask.score < 0) {
         results[i] = baselineTask
+        completed++
+        updateSpinner(`Baseline rejudge: ${completed}/${queue.length} re-scored`)
         continue
       }
 
@@ -179,11 +183,10 @@ async function runBaselineRejudgeRound(
           ...baselineTask,
           score: judging.overallScore,
           judging,
-          costEstimate: 0, // rejudge cost is tracked separately in the judge process
+          costEstimate: 0,
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
-        console.warn(`  [Rejudge] ${baselineTask.featureId} failed: ${msg.slice(0, 200)}`)
         results[i] = {
           ...baselineTask,
           score: -1,
@@ -199,6 +202,8 @@ async function runBaselineRejudgeRound(
           },
         }
       }
+      completed++
+      updateSpinner(`Baseline rejudge: ${completed}/${queue.length} re-scored`)
     }
   }
 
@@ -206,17 +211,14 @@ async function runBaselineRejudgeRound(
     Array.from({ length: Math.min(opts.parallelism, queue.length) }, () => worker()),
   )
 
+  stopSpinner()
+
   const valid = results.filter((r) => r.score >= 0)
   const avgScore = valid.length > 0
     ? valid.reduce((a, r) => a + r.score, 0) / valid.length
     : 0
 
-  console.log(`\nBaseline rejudge (loop ${loop}) results:`)
-  for (const r of results) {
-    const status = r.score >= 0 ? `${r.score.toFixed(1)}/10` : 'FAILED'
-    console.log(`  ${r.featureId}: ${status}`)
-  }
-  console.log(`  Average: ${avgScore.toFixed(1)}/10 (vs baseline ${baseline.avgScore.toFixed(1)}/10)`)
+  printBaselineRejudge(avgScore, baseline.avgScore)
 
   return { round: loop, tasks: results, avgScore, totalCost: 0 }
 }
@@ -240,44 +242,34 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     logDir,
   })
 
-  console.log(`\nEvalbuff Run`)
-  console.log(`  Repo: ${opts.repoPath}`)
-  console.log(`  Improvement loops: ${opts.loops}`)
-  console.log(`  Coding model: ${opts.codingModel}`)
-  console.log(`  Docs model: ${opts.docsModel}`)
-  console.log(`  Log dir: ${logDir}`)
+  printHeader({
+    repoPath: opts.repoPath,
+    n: opts.n,
+    loops: opts.loops,
+    codingModel: opts.codingModel,
+    docsModel: opts.docsModel,
+    logDir,
+  })
 
   let features: CarvedFeature[]
 
   if (opts.cachedFeatures) {
-    // --- Load cached features ---
-    console.log(`\nLoading cached features from ${opts.cachedFeatures}`)
     const cached: CarvedFeature[] = JSON.parse(fs.readFileSync(opts.cachedFeatures, 'utf-8'))
     features = selectRandom(cached, opts.n)
-    console.log(`  Loaded ${cached.length} features, selected ${features.length}: ${features.map(f => f.id).join(', ')}`)
+    console.log(`\n  Loaded ${features.length} cached features`)
 
     events.send({ type: 'feature_planned', totalCandidates: cached.length, selectedIds: features.map(f => f.id) })
     fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
   } else {
-    // --- Step 1: Plan features ---
-    console.log(`  Features to carve: ${opts.n}`)
     events.send({ type: 'phase_change', phase: 'planning', detail: 'Analyzing codebase...' })
-    console.log(`\n${'='.repeat(60)}`)
-    console.log('STEP 1: Planning features to carve...')
-    console.log(`${'='.repeat(60)}`)
+    startSpinner('Planning features...')
 
     const plan = await planFeatures(opts.repoPath)
-    console.log(`\nIdentified ${plan.candidates.length} candidates. Reasoning:\n${plan.reasoning.slice(0, 500)}`)
+    stopSpinner(`  Found ${plan.candidates.length} candidates`)
 
     fs.writeFileSync(path.join(logDir, 'plan.json'), JSON.stringify(plan, null, 2))
 
-    // --- Step 2: Select random subset and carve ---
-    console.log(`\n${'='.repeat(60)}`)
-    console.log(`STEP 2: Selecting ${opts.n} random features and carving...`)
-    console.log(`${'='.repeat(60)}`)
-
     const selected = selectRandom(plan.candidates, opts.n)
-    console.log(`Selected: ${selected.map((c) => c.id).join(', ')}`)
 
     events.send({ type: 'feature_planned', totalCandidates: plan.candidates.length, selectedIds: selected.map(c => c.id) })
     events.send({ type: 'phase_change', phase: 'carving', detail: `Carving ${selected.length} features...` })
@@ -286,7 +278,10 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     {
       const carveQueue = [...selected]
       let carveNext = 0
+      let carveCompleted = 0
       const carveResults: (CarvedFeature | null)[] = new Array(carveQueue.length).fill(null)
+
+      startSpinner(`Carving 0/${carveQueue.length} features...`)
 
       async function carveWorker(): Promise<void> {
         while (carveNext < carveQueue.length) {
@@ -298,13 +293,13 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
             if (carved) {
               carveResults[idx] = carved
               events.send({ type: 'feature_status', featureId: candidate.id, status: 'carved', detail: `${carved.operations.length} file operations` })
-              console.log(`  Carved: ${carved.id} — ${carved.operations.length} file operations`)
             }
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error)
             events.send({ type: 'feature_status', featureId: candidate.id, status: 'carve_failed', detail: msg.slice(0, 200) })
-            console.error(`  Failed to carve ${candidate.id}: ${msg.slice(0, 200)}`)
           }
+          carveCompleted++
+          updateSpinner(`Carving ${carveCompleted}/${carveQueue.length} features...`)
         }
       }
 
@@ -314,6 +309,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
       for (const result of carveResults) {
         if (result) features.push(result)
       }
+      stopSpinner(`  Carved ${features.length}/${carveQueue.length} features`)
     }
   }
 
@@ -330,11 +326,8 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
 
   fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
 
-  // --- Step 3: Baseline evaluation ---
+  // --- Baseline evaluation ---
   events.send({ type: 'phase_change', phase: 'evaluating', round: 0, detail: 'Baseline' })
-  console.log(`\n${'='.repeat(60)}`)
-  console.log('STEP 3: Baseline evaluation')
-  console.log(`${'='.repeat(60)}`)
 
   const baseline = await runEvalRound(features, groundTruthDiffs, opts, 0)
   saveRoundResults(logDir, baseline)
@@ -349,28 +342,27 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const baselineProjectSuggestions = collectProjectSuggestions(baseline.tasks.filter(t => t.score >= 0))
   if (baselineProjectSuggestions) allProjectSuggestionSections.push(`## Baseline Round\n\n${baselineProjectSuggestions}`)
 
-  // --- Step 4: Improvement loops ---
+  // --- Improvement loops ---
   for (let loop = 1; loop <= opts.loops; loop++) {
-    console.log(`\n${'*'.repeat(60)}`)
-    console.log(`IMPROVEMENT LOOP ${loop}/${opts.loops}`)
-    console.log(`${'*'.repeat(60)}`)
+    console.log(`\n\x1b[1mLoop ${loop}/${opts.loops}\x1b[0m`)
 
-    // 4a: Collect judge suggestions and run docs writer agent
+    // Docs writer
     const validTasks = previousResults.tasks.filter((t) => t.score >= 0)
     const judgeSuggestions = collectDocSuggestions(validTasks)
+    const suggestionCount = judgeSuggestions.split('\n').filter(l => l.startsWith('-')).length
 
     events.send({ type: 'phase_change', phase: 'docs_writer', loop })
-    events.send({ type: 'docs_writer', action: 'start', loop, suggestionCount: judgeSuggestions.split('\n').filter(l => l.startsWith('-')).length })
+    events.send({ type: 'docs_writer', action: 'start', loop, suggestionCount })
 
-    console.log(`\n--- Step 4a: Docs writer with judge suggestions ---`)
     const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
-
     fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${loop}.txt`), judgeSuggestions)
 
+    startSpinner(`Docs writer: processing ${suggestionCount} suggestions...`)
     await runDocsWriterAgent(opts.repoPath, judgeSuggestions, opts.docsModel)
     events.send({ type: 'docs_writer', action: 'complete', loop })
+    stopSpinner(`  Docs writer: applied ${suggestionCount} suggestions`)
 
-    // Save docs state and diff for this loop
+    // Save docs state and diff
     const docsAfterRefactor = getDocsSnapshot(opts.repoPath)
     const docsDiffText = computeDocsDiffText(docsSnapshotBefore, docsAfterRefactor)
     fs.writeFileSync(path.join(logDir, `docs-diff-loop-${loop}.txt`), docsDiffText)
@@ -379,50 +371,39 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
       JSON.stringify(docsAfterRefactor, null, 2),
     )
 
-    // 4b: Re-eval with updated docs
+    // Re-eval with updated docs
     events.send({ type: 'phase_change', phase: 'evaluating', round: loop, loop, detail: 'Re-eval with updated docs' })
-    console.log(`\n--- Step 4b: Re-evaluation with updated docs ---`)
-    const results = await runEvalRound(features, groundTruthDiffs, opts, loop)
+    const results = await runEvalRound(features, groundTruthDiffs, opts, loop, baseline.avgScore)
     saveRoundResults(logDir, results)
 
     totalCost += results.totalCost
     roundResults.push(results)
     previousResults = results
 
-    // 4c: Re-judge the BASELINE diffs against the current docs. This tells us
-    // whether judge scores are drifting because of docs-informed recalibration
-    // rather than real agent improvement.
-    console.log(`\n--- Step 4c: Re-judging baseline with current docs ---`)
+    // Re-judge baseline
     const rejudged = await runBaselineRejudgeRound(baseline, features, groundTruthDiffs, opts, loop)
     saveBaselineRejudgeResults(logDir, rejudged)
     baselineRejudgeResults.push(rejudged)
 
-    // Collect project suggestions from this loop
+    // Collect project suggestions
     const loopProjectSuggestions = collectProjectSuggestions(results.tasks.filter(t => t.score >= 0))
     if (loopProjectSuggestions) allProjectSuggestionSections.push(`## Loop ${loop}\n\n${loopProjectSuggestions}`)
-
-    console.log(
-      `\n  Loop ${loop} complete. Score: ${baseline.avgScore.toFixed(1)} → ${results.avgScore.toFixed(1)}` +
-      ` (baseline rejudged: ${baseline.avgScore.toFixed(1)} → ${rejudged.avgScore.toFixed(1)})`,
-    )
   }
 
-  // --- Step 5: Run prompt writer to consolidate project suggestions ---
+  // --- Generate project improvement prompts ---
   let projectPrompts: string[] = []
   const allProjectSuggestionsText = allProjectSuggestionSections.join('\n\n')
   if (allProjectSuggestionsText.trim()) {
-    console.log(`\n${'='.repeat(60)}`)
-    console.log('STEP 5: Generating project improvement prompts...')
-    console.log(`${'='.repeat(60)}`)
-
     fs.writeFileSync(path.join(logDir, 'project-suggestions-raw.txt'), allProjectSuggestionsText)
+    startSpinner('Generating project improvement prompts...')
     projectPrompts = await runPromptWriterAgent(opts.repoPath, allProjectSuggestionsText, opts.docsModel)
+    stopSpinner()
     if (projectPrompts.length > 0) {
       fs.writeFileSync(path.join(logDir, 'project-prompts.json'), JSON.stringify(projectPrompts, null, 2))
     }
   }
 
-  // --- Summary ---
+  // --- Final output ---
   const endTime = new Date().toISOString()
 
   const summary: EvalSummary = {
@@ -452,18 +433,24 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   })
   events.close()
 
-  console.log(`\n${'='.repeat(60)}`)
-  console.log('EVALBUFF RUN COMPLETE')
-  console.log(`${'='.repeat(60)}`)
-  console.log(`  Duration: ${startTime} → ${endTime}`)
-  console.log(`  Features: ${features.length}`)
-  console.log(`  Total cost: $${totalCost.toFixed(2)}`)
-  console.log(`  Score progression: ${summary.scoreProgression.map((s) => s.toFixed(1)).join(' → ')}`)
-  if (projectPrompts.length > 0) {
-    console.log(`  Project improvement prompts: ${projectPrompts.length}`)
-  }
-  console.log(`  Logs: ${logDir}`)
-  console.log(`  Report: ${path.join(logDir, 'report.md')}`)
+  // Print score table across all rounds
+  printScoreTable(roundResults, baselineRejudgeResults)
+
+  // Print project improvement prompts
+  printProjectPrompts(projectPrompts)
+
+  // Final summary line
+  printFinalSummary({
+    startTime,
+    endTime,
+    features: features.length,
+    totalCost,
+    scoreProgression: summary.scoreProgression,
+    baselineRejudgeProgression: summary.baselineRejudgeProgression || [],
+    promptCount: projectPrompts.length,
+    logDir,
+    reportPath: path.join(logDir, 'report.md'),
+  })
 }
 
 // --- CLI entry point ---

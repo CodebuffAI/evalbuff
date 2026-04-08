@@ -61,13 +61,11 @@ export async function runAgentOnCarve(opts: {
       if (initCommand) {
         try {
           execSync(initCommand, { cwd: repoDir, stdio: 'ignore', timeout: 120000 })
-        } catch (e) {
-          console.warn(`  [Run ${idx + 1}/${total}] Init command failed: ${e}`)
+        } catch {
+          // Init command failure is non-fatal
         }
       }
 
-      // Run coding agent
-      console.log(`  [Run ${idx + 1}/${total}] Running claude (${model}) for ${feature.id}...`)
       const runner = new ClaudeRunner(repoDir, {}, model, 'medium')
 
       let result: RunnerResult
@@ -81,9 +79,7 @@ export async function runAgentOnCarve(opts: {
       // to disk by saveRoundResults() in report.ts via compressAndSave().
       const agentTrace = result.steps.map((step) => JSON.stringify(step)).join('\n')
 
-      // Judge with Codex reviewer (hard 35-minute timeout to prevent hangs)
       const JUDGE_TIMEOUT_MS = 35 * 60 * 1000
-      console.log(`  [Run ${idx + 1}/${total}] Judging ${feature.id} with Codex reviewer...`)
       let judging: JudgingResult
       try {
         judging = await Promise.race([
@@ -99,7 +95,6 @@ export async function runAgentOnCarve(opts: {
         ])
       } catch (judgeError) {
         const errMsg = judgeError instanceof Error ? judgeError.message : String(judgeError)
-        console.warn(`  [Run ${idx + 1}/${total}] Judge failed: ${errMsg.slice(0, 200)}`)
         judging = {
           analysis: `Judge failed: ${errMsg.slice(0, 500)}`,
           strengths: [],
@@ -193,12 +188,10 @@ export async function rejudgeBaselineWithCurrentDocs(opts: {
     if (initCommand) {
       try {
         execSync(initCommand, { cwd: repoDir, stdio: 'ignore', timeout: 120000 })
-      } catch (e) {
-        console.warn(`  [Rejudge ${idx + 1}/${total}] Init command failed: ${e}`)
+      } catch {
+        // Init command failure is non-fatal
       }
     }
-
-    console.log(`  [Rejudge ${idx + 1}/${total}] Re-judging baseline ${feature.id} with current docs...`)
 
     const JUDGE_TIMEOUT_MS = 35 * 60 * 1000
     return await Promise.race([

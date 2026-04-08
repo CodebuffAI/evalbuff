@@ -6,7 +6,6 @@ import { z } from 'zod/v4'
 
 import { truncateDiff } from './eval-helpers'
 
-import type { ThreadItem } from '@openai/codex-sdk'
 
 export const SuggestionSchema = z.object({
   text: z.string().describe('The suggestion content'),
@@ -245,11 +244,8 @@ async function runCodexReviewer(
     modelReasoningEffort: 'high',
   })
 
-  console.log(`[Reviewer:codex] Starting review in ${cwd}`)
-
   const abortController = new AbortController()
   const timer = setTimeout(() => {
-    console.warn(`[Reviewer:codex] Timed out after ${timeoutMs / 1000}s`)
     abortController.abort()
   }, timeoutMs)
 
@@ -259,20 +255,10 @@ async function runCodexReviewer(
     })
 
     for await (const event of events) {
-      if (event.type === 'item.completed') {
-        logItem(event.item, 'codex')
-      } else if (event.type === 'turn.failed') {
-        console.error(`[Reviewer:codex] Turn failed: ${event.error.message}`)
-      } else if (event.type === 'error') {
-        console.error(`[Reviewer:codex] Error: ${event.message}`)
-      }
+      // Events are captured in traces; no console output needed
     }
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
-      console.warn(`[Reviewer:codex] Aborted`)
-    } else {
-      console.error(`[Reviewer:codex] Failed: ${err.message}`)
-    }
+  } catch {
+    // Errors are handled by the caller via null result
   } finally {
     clearTimeout(timer)
   }
@@ -280,23 +266,6 @@ async function runCodexReviewer(
   // Try to read the result file
   const resultPath = path.join(cwd, RESULT_FILE_NAME)
   return parseResultFile(resultPath, 'codex')
-}
-
-function logItem(item: ThreadItem, label: string): void {
-  switch (item.type) {
-    case 'agent_message':
-      process.stdout.write(item.text)
-      break
-    case 'command_execution':
-      console.log(`[Reviewer:${label}] $ ${item.command} (exit: ${item.exit_code})`)
-      break
-    case 'file_change':
-      console.log(`[Reviewer:${label}] File changes: ${item.changes.map(c => `${c.kind} ${c.path}`).join(', ')}`)
-      break
-    case 'error':
-      console.error(`[Reviewer:${label}] Item error: ${item.message}`)
-      break
-  }
 }
 
 function parseResultFile(
@@ -308,21 +277,10 @@ function parseResultFile(
     const raw = JSON.parse(fs.readFileSync(resultPath, 'utf-8'))
     const parsed = JudgingResultSchema.safeParse(raw)
     if (parsed.success) {
-      console.log(
-        `[Reviewer:${agentType}] Parsed result file successfully`,
-      )
       return parsed.data
     }
-    console.warn(
-      `[Reviewer:${agentType}] Result file failed validation:`,
-      parsed.error,
-    )
     return salvagePartialResult(raw)
-  } catch (error) {
-    console.warn(
-      `[Reviewer:${agentType}] Failed to parse result file:`,
-      error,
-    )
+  } catch {
     return null
   }
 }
@@ -377,12 +335,8 @@ export async function judgeTaskResult(
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const result = await runCodexReviewer(prompt, repoDir)
     if (result) return result
-    if (attempt < maxRetries) {
-      console.warn(`[Judge] Attempt ${attempt}/${maxRetries} failed, retrying...`)
-    }
   }
 
-  console.error(`[Judge] All ${maxRetries} attempts failed`)
   return {
     analysis: 'Error: reviewer agent failed to provide results after retries',
     strengths: [],

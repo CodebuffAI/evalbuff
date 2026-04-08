@@ -45,7 +45,6 @@ export async function runDocsWriterAgent(
   judgeSuggestions: string,
   model: string,
 ): Promise<void> {
-  console.log(`\n  [DocsWriter] Running docs writer agent...`)
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-docs-'))
   const repoDir = path.join(tempDir, 'repo')
 
@@ -140,9 +139,8 @@ After the sub-agent returns, apply every valid fix it identified by editing the 
     const runner = new ClaudeRunner(repoDir, {}, model, 'high')
     await runner.run(prompt)
     syncDocsIntoRepo(repoDir, repoPath)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.warn(`  [DocsWriter] Failed: ${msg.slice(0, 200)}`)
+  } catch {
+    // Failure is handled by the caller via missing docs changes
   } finally {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true })
@@ -159,7 +157,6 @@ export async function runPromptWriterAgent(
   allProjectSuggestions: string,
   model: string,
 ): Promise<string[]> {
-  console.log(`\n  [PromptWriter] Running prompt writer agent...`)
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-prompts-'))
   const repoDir = path.join(tempDir, 'repo')
 
@@ -222,19 +219,15 @@ IMPORTANT: You MUST write the result file. This is the only output that gets cap
       try {
         const parsed = JSON.parse(fs.readFileSync(resultPath, 'utf-8'))
         if (Array.isArray(parsed)) {
-          console.log(`  [PromptWriter] Generated ${parsed.length} project improvement prompts`)
           return parsed.filter((p): p is string => typeof p === 'string')
         }
-      } catch (parseErr) {
-        console.warn(`  [PromptWriter] Failed to parse result: ${parseErr}`)
+      } catch {
+        // Parse failure — return empty
       }
     } else {
-      console.warn(`  [PromptWriter] No result file written`)
     }
     return []
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.warn(`  [PromptWriter] Failed: ${msg.slice(0, 200)}`)
+  } catch {
     return []
   } finally {
     try {
