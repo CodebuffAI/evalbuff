@@ -30,6 +30,21 @@ $TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
 │
 ├── judge-suggestions-loop-1.txt       # Human-readable summary of accepted/rejected/overfit-skipped doc candidates
 ├── doc-gates-loop-1.json              # Detailed per-candidate gate results for loop 1, including overfit and low-priority rejections
+├── doc-candidates-loop-1/             # Per-candidate validation artifacts for every considered docs change
+│   └── <featureId>/
+│       └── candidate-01/
+│           ├── metadata.json          # Summary row for this candidate (status, scores, reason, docsDiff)
+│           ├── suggestion.txt         # Raw suggestion text
+│           ├── docs.patch             # Proposed docs patch, when available
+│           ├── docs-diff.txt          # Docs diff that was tested for this candidate
+│           ├── rejudge.json           # Full rejudge output for the previous trace with updated docs
+│           ├── rerun-trace.txt        # Validation rerun trace when a rerun happened
+│           ├── rerun-trace.txt.compressed
+│           ├── rerun-trace.txt.sidecars/
+│           ├── rerun-diff.txt
+│           ├── rerun-judging.json
+│           ├── rerun-score.txt
+│           └── rerun-agent-suggestions.json
 ├── docs-diff-loop-1.txt               # Before/after diff of docs for loop 1
 ├── docs-state-loop-1.json             # Snapshot of all docs after loop 1
 │
@@ -60,10 +75,11 @@ $TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
 
 ## Loop Artifact Timing
 
-Loop artifacts (`judge-suggestions-loop-N.txt`, `doc-gates-loop-N.json`, `docs-diff-loop-N.txt`, `docs-state-loop-N.json`) are written at the **log-dir root** after the sequential doc-gating pass, **before** the corresponding `round-N/` directory is created by `saveRoundResults()`. This means:
+Loop artifacts (`judge-suggestions-loop-N.txt`, `doc-gates-loop-N.json`, `doc-candidates-loop-N/`, `docs-diff-loop-N.txt`, `docs-state-loop-N.json`) are written at the **log-dir root** after the sequential doc-gating pass, **before** the corresponding `round-N/` directory is created by `saveRoundResults()`. This means:
 
 - `judge-suggestions-loop-N.txt` should exist for every completed loop, even if it is empty.
 - `doc-gates-loop-N.json` contains every considered docs candidate for the loop, including accepted/rejected status, overfit/low-priority filtering, and rejudge/rerun scores when applicable.
+- `doc-candidates-loop-N/` contains one directory per considered candidate with the tested docs diff, the full rejudge output when available, and the full rerun trace/diff/judging bundle when a rerun happened.
 - `docs-diff-loop-N.txt` must always exist after the docs-writer step — empty string when nothing changed.
 - `docs-state-loop-N.json` must always exist — contains the `getDocsSnapshot(repoPath)` result after refactoring.
 

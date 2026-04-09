@@ -37,7 +37,7 @@ import {
   printHeader, printRoundScores, printBaselineRejudge,
   printScoreTable, printProjectPrompts, printFinalSummary,
 } from './log'
-import { saveRoundResults, saveBaselineRejudgeResults, saveLoopDocGateResults, saveSummary } from './report'
+import { saveRoundResults, saveBaselineRejudgeResults, saveLoopDocGateArtifacts, saveLoopDocGateResults, saveSummary } from './report'
 import { events } from './tui/events'
 
 import type { CarvedFeature } from './carve-features'
@@ -47,6 +47,7 @@ import type {
   EvalSummary,
   DocChangeGateCandidateResult,
   FeatureDocGateResult,
+  FeatureDocGateArtifacts,
   LoopDocGateResult,
 } from './report'
 
@@ -381,13 +382,29 @@ export async function gateDocsChangesForTask(args: {
   loop: number
 }, deps: GateDocsChangesDeps = defaultGateDocsChangesDeps): Promise<{
   result: FeatureDocGateResult
+  artifacts: FeatureDocGateArtifacts
   validationCost: number
 }> {
   const allSuggestions = deps.collectTaskDocSuggestions(args.task)
   const suggestions = deps.filterDocSuggestionsForPlanning(allSuggestions)
   const gatedCandidates: DocChangeGateCandidateResult[] = []
+  const gateArtifacts: FeatureDocGateArtifacts = {
+    featureId: args.feature.id,
+    candidates: [],
+  }
   let validationCost = 0
   let enteredDocsWriterPhase = false
+
+  function recordCandidate(
+    candidate: DocChangeGateCandidateResult,
+    artifacts: Omit<FeatureDocGateArtifacts['candidates'][number], 'summary'> = {},
+  ): void {
+    gatedCandidates.push(candidate)
+    gateArtifacts.candidates.push({
+      summary: candidate,
+      ...artifacts,
+    })
+  }
 
   if (allSuggestions.length === 0 || args.task.score < 0) {
     return {
@@ -396,6 +413,7 @@ export async function gateDocsChangesForTask(args: {
         baseScore: args.task.score,
         candidates: [],
       },
+      artifacts: gateArtifacts,
       validationCost,
     }
   }
@@ -417,7 +435,7 @@ export async function gateDocsChangesForTask(args: {
   let plan: Awaited<ReturnType<typeof planDocsChangesForTask>> | null = null
   try {
     for (const skipped of allSuggestions.filter((suggestion) => suggestion.priority < DEFAULT_DOC_SUGGESTION_PRIORITY_FLOOR)) {
-      gatedCandidates.push({
+      recordCandidate({
         source: skipped.source,
         priority: skipped.priority,
         text: skipped.text,
@@ -437,6 +455,7 @@ export async function gateDocsChangesForTask(args: {
           baseScore: args.task.score,
           candidates: gatedCandidates,
         },
+        artifacts: gateArtifacts,
         validationCost,
       }
     }
@@ -449,7 +468,7 @@ export async function gateDocsChangesForTask(args: {
     )
     if (!plan) {
       for (const suggestion of suggestions) {
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -467,13 +486,14 @@ export async function gateDocsChangesForTask(args: {
           baseScore: args.task.score,
           candidates: gatedCandidates,
         },
+        artifacts: gateArtifacts,
         validationCost,
       }
     }
 
     for (const suggestion of plan.candidates) {
       if (!suggestion.accepted) {
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -483,12 +503,14 @@ export async function gateDocsChangesForTask(args: {
           reason: suggestion.reason,
           baseScore: args.task.score,
           docsDiff: suggestion.diffText || '',
+        }, {
+          docsPatchText: suggestion.patchText,
         })
         continue
       }
 
       if (!suggestion.patchText) {
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -504,7 +526,7 @@ export async function gateDocsChangesForTask(args: {
 
       const draft = deps.materializeDocsChangeFromPatch(args.opts.repoPath, suggestion.patchText)
       if (!draft) {
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -514,13 +536,15 @@ export async function gateDocsChangesForTask(args: {
           reason: `Failed to materialize docs change: ${suggestion.reason}`,
           baseScore: args.task.score,
           docsDiff: suggestion.diffText || '',
+        }, {
+          docsPatchText: suggestion.patchText,
         })
         continue
       }
 
       if (!draft.diffText.trim()) {
         deps.cleanupDraftedDocsChange(draft)
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -529,12 +553,15 @@ export async function gateDocsChangesForTask(args: {
           status: 'rejected_no_change',
           reason: 'The planned docs change produced no effective diff when applied to the current docs.',
           baseScore: args.task.score,
-          docsDiff: suggestion.diffText || '',
+          docsDiff: draft.diffText,
+        }, {
+          docsPatchText: suggestion.patchText,
         })
         continue
       }
 
       let rejudgeScore: number | undefined
+      let rejudgeJudging: Awaited<ReturnType<typeof rejudgeTaskWithCurrentDocs>> | undefined
       try {
         const rejudged = await deps.rejudgeTaskWithCurrentDocs({
           idx: 0,
@@ -546,11 +573,12 @@ export async function gateDocsChangesForTask(args: {
           initCommand: args.opts.initCommand,
           docsSourcePath: draft.repoDir,
         })
+        rejudgeJudging = rejudged
         rejudgeScore = rejudged.overallScore
       } catch (error) {
         deps.cleanupDraftedDocsChange(draft)
         const msg = error instanceof Error ? error.message : String(error)
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -560,13 +588,15 @@ export async function gateDocsChangesForTask(args: {
           reason: `Rejudge failed: ${msg.slice(0, 200)}`,
           baseScore: args.task.score,
           docsDiff: draft.diffText,
+        }, {
+          docsPatchText: suggestion.patchText,
         })
         continue
       }
 
       if (rejudgeScore === undefined) {
         deps.cleanupDraftedDocsChange(draft)
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -576,6 +606,8 @@ export async function gateDocsChangesForTask(args: {
           reason: 'Rejudge did not produce a score.',
           baseScore: args.task.score,
           docsDiff: draft.diffText,
+        }, {
+          docsPatchText: suggestion.patchText,
         })
         continue
       }
@@ -586,7 +618,7 @@ export async function gateDocsChangesForTask(args: {
       })
       if (fastDecision.accepted && fastDecision.fastAccepted) {
         deps.acceptDraftedDocsChange(args.opts.repoPath, draft)
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -598,6 +630,9 @@ export async function gateDocsChangesForTask(args: {
           rejudgeScore,
           gateDelta: fastDecision.gateDelta,
           docsDiff: draft.diffText,
+        }, {
+          docsPatchText: suggestion.patchText,
+          rejudgeJudging,
         })
         continue
       }
@@ -621,7 +656,7 @@ export async function gateDocsChangesForTask(args: {
       })
       if (rerunTask.score >= 0 && decision.accepted) {
         deps.acceptDraftedDocsChange(args.opts.repoPath, draft)
-        gatedCandidates.push({
+        recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
@@ -634,12 +669,16 @@ export async function gateDocsChangesForTask(args: {
           rerunScore: rerunTask.score,
           gateDelta: decision.gateDelta,
           docsDiff: draft.diffText,
+        }, {
+          docsPatchText: suggestion.patchText,
+          rejudgeJudging,
+          rerunTask,
         })
         continue
       }
 
       deps.cleanupDraftedDocsChange(draft)
-      gatedCandidates.push({
+      recordCandidate({
         source: suggestion.source,
         priority: suggestion.priority,
         text: suggestion.text,
@@ -654,6 +693,10 @@ export async function gateDocsChangesForTask(args: {
         rerunScore: rerunTask.score,
         gateDelta: decision.gateDelta,
         docsDiff: draft.diffText,
+      }, {
+        docsPatchText: suggestion.patchText,
+        rejudgeJudging,
+        rerunTask,
       })
     }
 
@@ -663,6 +706,7 @@ export async function gateDocsChangesForTask(args: {
         baseScore: args.task.score,
         candidates: gatedCandidates,
       },
+      artifacts: gateArtifacts,
       validationCost,
     }
   } finally {
@@ -805,6 +849,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
   events.send({ type: 'phase_change', phase: 'evaluating', round: improvementRound, loop: improvementRound, detail: 'Re-eval with updated docs' })
   const featureGateResults: FeatureDocGateResult[] = []
+  const featureGateArtifacts: FeatureDocGateArtifacts[] = []
   const results = await runEvalRound(
     features,
     groundTruthDiffs,
@@ -820,6 +865,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
         loop: improvementRound,
       })
       featureGateResults.push(gated.result)
+      featureGateArtifacts.push(gated.artifacts)
       return gated.validationCost
     },
   )
@@ -845,6 +891,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     JSON.stringify(docsAfterRefactor, null, 2),
   )
   saveLoopDocGateResults(logDir, loopDocGateResult)
+  saveLoopDocGateArtifacts(logDir, improvementRound, featureGateArtifacts)
   saveRoundResults(logDir, results)
 
   const rejudged = await runBaselineRejudgeRound(baseline, features, groundTruthDiffs, opts, improvementRound)

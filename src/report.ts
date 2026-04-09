@@ -44,6 +44,18 @@ export interface FeatureDocGateResult {
   candidates: DocChangeGateCandidateResult[]
 }
 
+export interface DocChangeGateCandidateArtifacts {
+  summary: DocChangeGateCandidateResult
+  docsPatchText?: string
+  rejudgeJudging?: JudgingResult
+  rerunTask?: TaskResult
+}
+
+export interface FeatureDocGateArtifacts {
+  featureId: string
+  candidates: DocChangeGateCandidateArtifacts[]
+}
+
 export interface LoopDocGateResult {
   loop: number
   threshold: number
@@ -112,6 +124,71 @@ export function saveLoopDocGateResults(
     path.join(logDir, `doc-gates-loop-${loopResult.loop}.json`),
     JSON.stringify(loopResult, null, 2),
   )
+}
+
+function sanitizePathSegment(value: string): string {
+  const normalized = value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+  return normalized || 'item'
+}
+
+export function saveLoopDocGateArtifacts(
+  logDir: string,
+  loop: number,
+  features: FeatureDocGateArtifacts[],
+): void {
+  const rootDir = path.join(logDir, `doc-candidates-loop-${loop}`)
+  fs.mkdirSync(rootDir, { recursive: true })
+
+  for (const feature of features) {
+    const featureDir = path.join(rootDir, sanitizePathSegment(feature.featureId))
+    fs.mkdirSync(featureDir, { recursive: true })
+
+    for (let i = 0; i < feature.candidates.length; i++) {
+      const candidate = feature.candidates[i]
+      const candidateDir = path.join(featureDir, `candidate-${String(i + 1).padStart(2, '0')}`)
+      fs.mkdirSync(candidateDir, { recursive: true })
+
+      fs.writeFileSync(path.join(candidateDir, 'metadata.json'), JSON.stringify(candidate.summary, null, 2))
+      fs.writeFileSync(path.join(candidateDir, 'suggestion.txt'), candidate.summary.text + '\n')
+
+      if (candidate.docsPatchText && candidate.docsPatchText.trim()) {
+        fs.writeFileSync(path.join(candidateDir, 'docs.patch'), candidate.docsPatchText)
+      }
+
+      if (candidate.summary.docsDiff.trim()) {
+        fs.writeFileSync(path.join(candidateDir, 'docs-diff.txt'), candidate.summary.docsDiff)
+      }
+
+      if (candidate.rejudgeJudging) {
+        fs.writeFileSync(
+          path.join(candidateDir, 'rejudge.json'),
+          JSON.stringify(candidate.rejudgeJudging, null, 2),
+        )
+      }
+
+      if (candidate.rerunTask) {
+        const tracePath = path.join(candidateDir, 'rerun-trace.txt')
+        fs.writeFileSync(tracePath, candidate.rerunTask.trace)
+        compressAndSave(tracePath, candidate.rerunTask.trace).catch((err: unknown) => {
+          console.warn(`[report] Failed to compress rerun trace for ${feature.featureId}: ${err}`)
+        })
+
+        fs.writeFileSync(path.join(candidateDir, 'rerun-diff.txt'), candidate.rerunTask.diff)
+        fs.writeFileSync(
+          path.join(candidateDir, 'rerun-judging.json'),
+          JSON.stringify(candidate.rerunTask.judging, null, 2),
+        )
+        fs.writeFileSync(path.join(candidateDir, 'rerun-score.txt'), candidate.rerunTask.score.toString())
+        fs.writeFileSync(
+          path.join(candidateDir, 'rerun-agent-suggestions.json'),
+          JSON.stringify({
+            docSuggestions: candidate.rerunTask.agentDocSuggestions,
+            projectSuggestions: candidate.rerunTask.agentProjectSuggestions,
+          }, null, 2),
+        )
+      }
+    }
+  }
 }
 
 export function saveRoundResults(logDir: string, roundResult: RoundResult): void {
