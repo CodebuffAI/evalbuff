@@ -42,6 +42,21 @@
 
 Both helpers use `getErrorObject()` from `src/vendor/error.ts` for logging init-command failures.
 
+## Worktree Isolation Pattern (Carve Features)
+
+`carveFeature()` in `src/carve-features.ts` uses git worktrees instead of full clones to isolate each carve operation. The lifecycle:
+
+1. **Create**: `git worktree add -b "<branchName>" "<worktreePath>" HEAD` — creates a new worktree checked out at the current HEAD on a temporary branch. The worktree path is constructed inline as `${repoPath}-carve-${candidate.id}` and the branch as `evalbuff-carve-${candidate.id}-${Date.now()}`.
+2. **Run**: The Codex agent operates inside the worktree directory, making changes to remove the feature.
+3. **Capture**: Diff and file operations are captured from the worktree before cleanup.
+4. **Cleanup** (in a `finally` block):
+   - `git worktree remove --force "<worktreePath>"`
+   - `git branch -D "<branchName>"`
+
+**Why worktrees over clones**: Worktrees share the parent repo's object store rather than duplicating it. This avoids network I/O, object copying, and disk duplication — important when carving runs a parallel worker pool (`CARVE_PARALLELISM`) and each worker needs an isolated checkout. The tradeoff is that worktrees are coupled to the parent repo (deleting the parent breaks them), but carve worktrees are ephemeral and cleaned up in the same function call.
+
+**Cleanup safety**: Both the `worktree remove` and `branch -D` commands run inside a `finally` block so worktrees and branches are cleaned up even when the carve agent fails. Tests should verify no leaked worktrees after carving by asserting `git worktree list` shows exactly one entry (the main working tree).
+
 ## Testing Helpers
 
 See `docs/testing.md` section "Helper-Contract Tests" for the required test patterns when modifying or extending these helpers. Key rule: always test against real temp git repos, not mocked filesystem calls.

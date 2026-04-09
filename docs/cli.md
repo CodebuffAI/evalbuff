@@ -40,6 +40,24 @@ bun run src/trace-compressor.ts --restore <compressed>   # Restore
 
 Options: `--output`, `--sidecar-dir`, `--threshold <bytes>`, `--format auto|jsonl|text`, `--summarize heuristic|claude|none`. Supports stdin/stdout with `-`.
 
+## E2E Benchmark Repo Setup
+
+```bash
+bun run setup:e2e-repos
+bun run setup:e2e-repos -- --repo mock-simple
+bun run setup:e2e-repos -- --root /tmp/evalbuff-test-repos --force
+```
+
+Creates deterministic local benchmark repos under `test-repos/` by default:
+- `mock-simple` — generated locally for fast/mock E2E coverage
+- `codebuff` — pinned checkout of `CodebuffAI/codebuff`
+- `manifold` — pinned checkout of `manifoldmarkets/manifold`, plus a local fixture commit that renames `docs/` to `external-docs/`
+
+Flags:
+- `--root <path>` chooses the target directory
+- `--repo <id>` limits setup to specific repo ids and may be repeated
+- `--force` rebuilds fixture directories that already exist
+
 ## TUI Dashboard
 
 ```bash

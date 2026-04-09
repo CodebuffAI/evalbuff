@@ -66,6 +66,10 @@ const DOC_CHANGE_ACCEPTANCE_THRESHOLD = 0.5
 const DOC_CHANGE_FAST_ACCEPT_THRESHOLD = DOC_CHANGE_ACCEPTANCE_THRESHOLD * 2
 const CARVE_PARALLELISM = 10
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 export function evaluateDocChangeGate(args: {
   baseScore: number
   rejudgeScore: number
@@ -733,6 +737,10 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const logDir = path.join(os.tmpdir(), `evalbuff-run-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
   fs.mkdirSync(logDir, { recursive: true })
 
+  let totalCost = 0
+  let scoreProgression: number[] = []
+  let completionDetail = 'Run completed.'
+
   events.initLog(logDir)
   events.send({
     type: 'run_start',
@@ -743,227 +751,240 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     logDir,
   })
 
-  printHeader({
-    repoPath: opts.repoPath,
-    n: opts.n,
-    codingModel: opts.codingModel,
-    docsModel: opts.docsModel,
-    logDir,
-  })
+  try {
+    printHeader({
+      repoPath: opts.repoPath,
+      n: opts.n,
+      codingModel: opts.codingModel,
+      docsModel: opts.docsModel,
+      logDir,
+    })
 
-  let features: CarvedFeature[]
+    let features: CarvedFeature[]
 
-  if (opts.cachedFeatures) {
-    const cached: CarvedFeature[] = JSON.parse(fs.readFileSync(opts.cachedFeatures, 'utf-8'))
-    features = selectRandom(cached, opts.n)
-    console.log(`\n  Loaded ${features.length} cached features`)
+    if (opts.cachedFeatures) {
+      const cached: CarvedFeature[] = JSON.parse(fs.readFileSync(opts.cachedFeatures, 'utf-8'))
+      features = selectRandom(cached, opts.n)
+      console.log(`\n  Loaded ${features.length} cached features`)
 
-    events.send({ type: 'feature_planned', totalCandidates: cached.length, selectedIds: features.map(f => f.id) })
-    fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
-  } else {
-    events.send({ type: 'phase_change', phase: 'planning', detail: 'Analyzing codebase...' })
-    startSpinner('Planning features...')
+      events.send({ type: 'feature_planned', totalCandidates: cached.length, selectedIds: features.map(f => f.id) })
+      fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
+    } else {
+      events.send({ type: 'phase_change', phase: 'planning', detail: 'Analyzing codebase...' })
+      startSpinner('Planning features...')
 
-    const plan = await planFeatures(opts.repoPath)
-    stopSpinner(`  Found ${plan.candidates.length} candidates`)
+      const plan = await planFeatures(opts.repoPath)
+      stopSpinner(`  Found ${plan.candidates.length} candidates`)
 
-    fs.writeFileSync(path.join(logDir, 'plan.json'), JSON.stringify(plan, null, 2))
+      fs.writeFileSync(path.join(logDir, 'plan.json'), JSON.stringify(plan, null, 2))
 
-    const selected = selectRandom(plan.candidates, opts.n)
+      const selected = selectRandom(plan.candidates, opts.n)
 
-    events.send({ type: 'feature_planned', totalCandidates: plan.candidates.length, selectedIds: selected.map(c => c.id) })
-    events.send({ type: 'phase_change', phase: 'carving', detail: `Carving ${selected.length} features...` })
+      events.send({ type: 'feature_planned', totalCandidates: plan.candidates.length, selectedIds: selected.map(c => c.id) })
+      events.send({ type: 'phase_change', phase: 'carving', detail: `Carving ${selected.length} features...` })
 
-    features = []
-    {
-      const carveQueue = [...selected]
-      let carveNext = 0
-      const carveResults: (CarvedFeature | null)[] = new Array(carveQueue.length).fill(null)
+      features = []
+      {
+        const carveQueue = [...selected]
+        let carveNext = 0
+        const carveResults: (CarvedFeature | null)[] = new Array(carveQueue.length).fill(null)
 
-      startSpinner(`Carving 0/${carveQueue.length} features...`)
-      let carveCompleted = 0
+        startSpinner(`Carving 0/${carveQueue.length} features...`)
+        let carveCompleted = 0
 
-      async function carveWorker(): Promise<void> {
-        while (carveNext < carveQueue.length) {
-          const idx = carveNext++
-          const candidate = carveQueue[idx]
-          try {
-            events.send({ type: 'feature_status', featureId: candidate.id, status: 'carving' })
-            const carved = await carveFeature(opts.repoPath, candidate)
-            if (carved) {
-              carveResults[idx] = carved
-              events.send({ type: 'feature_status', featureId: candidate.id, status: 'carved', detail: `${carved.operations.length} file operations` })
+        async function carveWorker(): Promise<void> {
+          while (carveNext < carveQueue.length) {
+            const idx = carveNext++
+            const candidate = carveQueue[idx]
+            try {
+              events.send({ type: 'feature_status', featureId: candidate.id, status: 'carving' })
+              const carved = await carveFeature(opts.repoPath, candidate)
+              if (carved) {
+                carveResults[idx] = carved
+                events.send({ type: 'feature_status', featureId: candidate.id, status: 'carved', detail: `${carved.operations.length} file operations` })
+              } else {
+                events.send({ type: 'feature_status', featureId: candidate.id, status: 'carve_failed', detail: 'Carve produced no changes.' })
+              }
+            } catch (error) {
+              const msg = getErrorMessage(error)
+              events.send({ type: 'feature_status', featureId: candidate.id, status: 'carve_failed', detail: msg.slice(0, 200) })
             }
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error)
-            events.send({ type: 'feature_status', featureId: candidate.id, status: 'carve_failed', detail: msg.slice(0, 200) })
+            carveCompleted++
+            updateSpinner(`Carving ${carveCompleted}/${carveQueue.length} features...`)
           }
-          carveCompleted++
-          updateSpinner(`Carving ${carveCompleted}/${carveQueue.length} features...`)
         }
+
+        await Promise.all(
+          Array.from({ length: Math.min(CARVE_PARALLELISM, carveQueue.length) }, () => carveWorker()),
+        )
+        for (const result of carveResults) {
+          if (result) features.push(result)
+        }
+        stopSpinner(`  Carved ${features.length}/${carveQueue.length} features`)
       }
+    }
 
-      await Promise.all(
-        Array.from({ length: Math.min(CARVE_PARALLELISM, carveQueue.length) }, () => carveWorker()),
-      )
-      for (const result of carveResults) {
-        if (result) features.push(result)
+    if (features.length === 0) {
+      completionDetail = 'Run aborted: no features were successfully carved.'
+      console.error('No features were successfully carved. Aborting.')
+      return
+    }
+
+    // Pre-compute ground truth diffs
+    const groundTruthDiffs = new Map<string, string>()
+    for (const feature of features) {
+      groundTruthDiffs.set(feature.id, getGroundTruthDiff(feature))
+    }
+
+    fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
+
+    // --- Baseline evaluation ---
+    events.send({ type: 'phase_change', phase: 'evaluating', round: 0, detail: 'Baseline' })
+
+    const baseline = await runEvalRound(features, groundTruthDiffs, opts, 0)
+    saveRoundResults(logDir, baseline)
+
+    totalCost = baseline.totalCost
+    const roundResults: RoundResult[] = [baseline]
+    scoreProgression = roundResults.map((round) => round.avgScore)
+    const baselineRejudgeResults: RoundResult[] = []
+    const loopDocGateResults: LoopDocGateResult[] = []
+    const allProjectSuggestionSections: string[] = []
+
+    // Collect project suggestions from baseline
+    const baselineProjectSuggestions = collectProjectSuggestions(baseline.tasks.filter(t => t.score >= 0))
+    if (baselineProjectSuggestions) allProjectSuggestionSections.push(`## Baseline Round\n\n${baselineProjectSuggestions}`)
+
+    // --- Improvement round ---
+    const improvementRound = 1
+    console.log(`\n\x1b[1mImprovement Round\x1b[0m`)
+
+    const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
+    events.send({ type: 'phase_change', phase: 'evaluating', round: improvementRound, loop: improvementRound, detail: 'Re-eval with updated docs' })
+    const featureGateResults: FeatureDocGateResult[] = []
+    const featureGateArtifacts: FeatureDocGateArtifacts[] = []
+    const results = await runEvalRound(
+      features,
+      groundTruthDiffs,
+      opts,
+      improvementRound,
+      baseline.avgScore,
+      async ({ feature, task }) => {
+        const gated = await gateDocsChangesForTask({
+          feature,
+          task,
+          opts,
+          groundTruthDiffs,
+          loop: improvementRound,
+        })
+        featureGateResults.push(gated.result)
+        featureGateArtifacts.push(gated.artifacts)
+        return gated.validationCost
+      },
+    )
+
+    totalCost += results.totalCost
+    roundResults.push(results)
+    scoreProgression = roundResults.map((round) => round.avgScore)
+
+    const loopDocGateResult: LoopDocGateResult = {
+      loop: improvementRound,
+      threshold: DOC_CHANGE_ACCEPTANCE_THRESHOLD,
+      fastAcceptThreshold: DOC_CHANGE_FAST_ACCEPT_THRESHOLD,
+      features: featureGateResults,
+    }
+    loopDocGateResults.push(loopDocGateResult)
+
+    const docsAfterRefactor = getDocsSnapshot(opts.repoPath)
+    const docsDiffText = computeDocsDiffText(docsSnapshotBefore, docsAfterRefactor)
+    const loopSummaryText = renderLoopDocGateSummary(loopDocGateResult)
+    fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${improvementRound}.txt`), loopSummaryText)
+    fs.writeFileSync(path.join(logDir, `docs-diff-loop-${improvementRound}.txt`), docsDiffText)
+    fs.writeFileSync(
+      path.join(logDir, `docs-state-loop-${improvementRound}.json`),
+      JSON.stringify(docsAfterRefactor, null, 2),
+    )
+    saveLoopDocGateResults(logDir, loopDocGateResult)
+    saveLoopDocGateArtifacts(logDir, improvementRound, featureGateArtifacts)
+    saveRoundResults(logDir, results)
+
+    const rejudged = await runBaselineRejudgeRound(baseline, features, groundTruthDiffs, opts, improvementRound)
+    saveBaselineRejudgeResults(logDir, rejudged)
+    baselineRejudgeResults.push(rejudged)
+
+    const loopProjectSuggestions = collectProjectSuggestions(results.tasks.filter(t => t.score >= 0))
+    if (loopProjectSuggestions) allProjectSuggestionSections.push(`## Improvement Round\n\n${loopProjectSuggestions}`)
+
+    // --- Generate project improvement prompts ---
+    let projectPrompts: string[] = []
+    const allProjectSuggestionsText = allProjectSuggestionSections.join('\n\n')
+    if (allProjectSuggestionsText.trim()) {
+      fs.writeFileSync(path.join(logDir, 'project-suggestions-raw.txt'), allProjectSuggestionsText)
+      startSpinner('Generating project improvement prompts...')
+      projectPrompts = await runPromptWriterAgent(opts.repoPath, allProjectSuggestionsText, opts.docsModel)
+      stopSpinner()
+      if (projectPrompts.length > 0) {
+        fs.writeFileSync(path.join(logDir, 'project-prompts.json'), JSON.stringify(projectPrompts, null, 2))
       }
-      stopSpinner(`  Carved ${features.length}/${carveQueue.length} features`)
     }
-  }
 
-  if (features.length === 0) {
-    console.error('No features were successfully carved. Aborting.')
-    return
-  }
+    // --- Final output ---
+    const endTime = new Date().toISOString()
 
-  // Pre-compute ground truth diffs
-  const groundTruthDiffs = new Map<string, string>()
-  for (const feature of features) {
-    groundTruthDiffs.set(feature.id, getGroundTruthDiff(feature))
-  }
-
-  fs.writeFileSync(path.join(logDir, 'features.json'), JSON.stringify(features, null, 2))
-
-  // --- Baseline evaluation ---
-  events.send({ type: 'phase_change', phase: 'evaluating', round: 0, detail: 'Baseline' })
-
-  const baseline = await runEvalRound(features, groundTruthDiffs, opts, 0)
-  saveRoundResults(logDir, baseline)
-
-  let totalCost = baseline.totalCost
-  const roundResults: RoundResult[] = [baseline]
-  const baselineRejudgeResults: RoundResult[] = []
-  const loopDocGateResults: LoopDocGateResult[] = []
-  const allProjectSuggestionSections: string[] = []
-
-  // Collect project suggestions from baseline
-  const baselineProjectSuggestions = collectProjectSuggestions(baseline.tasks.filter(t => t.score >= 0))
-  if (baselineProjectSuggestions) allProjectSuggestionSections.push(`## Baseline Round\n\n${baselineProjectSuggestions}`)
-
-  // --- Improvement round ---
-  const improvementRound = 1
-  console.log(`\n\x1b[1mImprovement Round\x1b[0m`)
-
-  const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
-  events.send({ type: 'phase_change', phase: 'evaluating', round: improvementRound, loop: improvementRound, detail: 'Re-eval with updated docs' })
-  const featureGateResults: FeatureDocGateResult[] = []
-  const featureGateArtifacts: FeatureDocGateArtifacts[] = []
-  const results = await runEvalRound(
-    features,
-    groundTruthDiffs,
-    opts,
-    improvementRound,
-    baseline.avgScore,
-    async ({ feature, task }) => {
-      const gated = await gateDocsChangesForTask({
-        feature,
-        task,
-        opts,
-        groundTruthDiffs,
-        loop: improvementRound,
-      })
-      featureGateResults.push(gated.result)
-      featureGateArtifacts.push(gated.artifacts)
-      return gated.validationCost
-    },
-  )
-
-  totalCost += results.totalCost
-  roundResults.push(results)
-
-  const loopDocGateResult: LoopDocGateResult = {
-    loop: improvementRound,
-    threshold: DOC_CHANGE_ACCEPTANCE_THRESHOLD,
-    fastAcceptThreshold: DOC_CHANGE_FAST_ACCEPT_THRESHOLD,
-    features: featureGateResults,
-  }
-  loopDocGateResults.push(loopDocGateResult)
-
-  const docsAfterRefactor = getDocsSnapshot(opts.repoPath)
-  const docsDiffText = computeDocsDiffText(docsSnapshotBefore, docsAfterRefactor)
-  const loopSummaryText = renderLoopDocGateSummary(loopDocGateResult)
-  fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${improvementRound}.txt`), loopSummaryText)
-  fs.writeFileSync(path.join(logDir, `docs-diff-loop-${improvementRound}.txt`), docsDiffText)
-  fs.writeFileSync(
-    path.join(logDir, `docs-state-loop-${improvementRound}.json`),
-    JSON.stringify(docsAfterRefactor, null, 2),
-  )
-  saveLoopDocGateResults(logDir, loopDocGateResult)
-  saveLoopDocGateArtifacts(logDir, improvementRound, featureGateArtifacts)
-  saveRoundResults(logDir, results)
-
-  const rejudged = await runBaselineRejudgeRound(baseline, features, groundTruthDiffs, opts, improvementRound)
-  saveBaselineRejudgeResults(logDir, rejudged)
-  baselineRejudgeResults.push(rejudged)
-
-  const loopProjectSuggestions = collectProjectSuggestions(results.tasks.filter(t => t.score >= 0))
-  if (loopProjectSuggestions) allProjectSuggestionSections.push(`## Improvement Round\n\n${loopProjectSuggestions}`)
-
-  // --- Generate project improvement prompts ---
-  let projectPrompts: string[] = []
-  const allProjectSuggestionsText = allProjectSuggestionSections.join('\n\n')
-  if (allProjectSuggestionsText.trim()) {
-    fs.writeFileSync(path.join(logDir, 'project-suggestions-raw.txt'), allProjectSuggestionsText)
-    startSpinner('Generating project improvement prompts...')
-    projectPrompts = await runPromptWriterAgent(opts.repoPath, allProjectSuggestionsText, opts.docsModel)
-    stopSpinner()
-    if (projectPrompts.length > 0) {
-      fs.writeFileSync(path.join(logDir, 'project-prompts.json'), JSON.stringify(projectPrompts, null, 2))
+    const summary: EvalSummary = {
+      repoPath: opts.repoPath,
+      startTime,
+      endTime,
+      featuresCarved: features.length,
+      rounds: roundResults.map((r) => ({
+        round: r.round,
+        avgScore: r.avgScore,
+        scores: Object.fromEntries(r.tasks.map((t) => [t.featureId, t.score])),
+        totalCost: r.totalCost,
+      })),
+      totalCost,
+      scoreProgression: roundResults.map((r) => r.avgScore),
+      baselineRejudgeProgression: baselineRejudgeResults.map((r) => r.avgScore),
+      consideredDocChangesByLoop: loopDocGateResults.map((result) => countLoopDocChanges(result).considered),
+      acceptedDocChangesByLoop: loopDocGateResults.map((result) => countLoopDocChanges(result).accepted),
+      projectPrompts,
     }
+
+    scoreProgression = summary.scoreProgression
+    saveSummary(logDir, summary, roundResults, opts, baselineRejudgeResults, loopDocGateResults, projectPrompts)
+
+    // Print score table across all rounds
+    printScoreTable(roundResults, baselineRejudgeResults)
+
+    // Print project improvement prompts
+    printProjectPrompts(projectPrompts)
+
+    // Final summary line
+    printFinalSummary({
+      startTime,
+      endTime,
+      features: features.length,
+      totalCost,
+      scoreProgression: summary.scoreProgression,
+      baselineRejudgeProgression: summary.baselineRejudgeProgression || [],
+      promptCount: projectPrompts.length,
+      logDir,
+      reportPath: path.join(logDir, 'report.md'),
+    })
+  } catch (error) {
+    completionDetail = `Run failed: ${getErrorMessage(error).slice(0, 200)}`
+    throw error
+  } finally {
+    const endTime = new Date().toISOString()
+    events.send({ type: 'phase_change', phase: 'complete', detail: completionDetail })
+    events.send({
+      type: 'run_complete',
+      scoreProgression,
+      totalCost,
+      duration: `${startTime} → ${endTime}`,
+    })
+    events.close()
   }
-
-  // --- Final output ---
-  const endTime = new Date().toISOString()
-
-  const summary: EvalSummary = {
-    repoPath: opts.repoPath,
-    startTime,
-    endTime,
-    featuresCarved: features.length,
-    rounds: roundResults.map((r) => ({
-      round: r.round,
-      avgScore: r.avgScore,
-      scores: Object.fromEntries(r.tasks.map((t) => [t.featureId, t.score])),
-      totalCost: r.totalCost,
-    })),
-    totalCost,
-    scoreProgression: roundResults.map((r) => r.avgScore),
-    baselineRejudgeProgression: baselineRejudgeResults.map((r) => r.avgScore),
-    consideredDocChangesByLoop: loopDocGateResults.map((result) => countLoopDocChanges(result).considered),
-    acceptedDocChangesByLoop: loopDocGateResults.map((result) => countLoopDocChanges(result).accepted),
-    projectPrompts,
-  }
-
-  saveSummary(logDir, summary, roundResults, opts, baselineRejudgeResults, loopDocGateResults, projectPrompts)
-
-  events.send({
-    type: 'run_complete',
-    scoreProgression: summary.scoreProgression,
-    totalCost,
-    duration: `${startTime} → ${endTime}`,
-  })
-  events.close()
-
-  // Print score table across all rounds
-  printScoreTable(roundResults, baselineRejudgeResults)
-
-  // Print project improvement prompts
-  printProjectPrompts(projectPrompts)
-
-  // Final summary line
-  printFinalSummary({
-    startTime,
-    endTime,
-    features: features.length,
-    totalCost,
-    scoreProgression: summary.scoreProgression,
-    baselineRejudgeProgression: summary.baselineRejudgeProgression || [],
-    promptCount: projectPrompts.length,
-    logDir,
-    reportPath: path.join(logDir, 'report.md'),
-  })
 }
 
 // --- CLI entry point ---
