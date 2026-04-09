@@ -17,6 +17,8 @@ bun run test:e2e           # E2E tests only
 
 Fresh workspaces (e.g., carved eval repos) may not have dependencies installed. Always run `bun install` or `bash setup.sh` before expecting `bun run typecheck` or `bun test` to succeed. A task is not complete until both commands pass after dependencies are installed.
 
+Local developer credentials can live in `.env.local`. `bunfig.toml` preloads `src/load-env.ts`, so direct Bun invocations such as `bun test src/__tests__/docs-writer.e2e.test.ts` and `bun run src/run-evalbuff.ts ...` automatically read `.env.local` first, then `.env`, without requiring wrapper scripts.
+
 ## Test File Layout
 
 - Unit tests: `src/__tests__/<module>.test.ts`
@@ -120,7 +122,7 @@ const SKIP = !process.env.OPENAI_API_KEY || !(process.env.CLAUDE_CODE_KEY || pro
 it.skipIf(SKIP)('full pipeline', async () => { ... })
 ```
 
-Build a temp git repo with at least 2 distinct feature areas and lightweight repo-local tests. Assert the real artifact structure from `docs/run-artifacts.md`: `plan.json`, `features.json`, `round-0/`, subsequent rounds, `baseline-rejudge-loop-N/`, loop artifacts, `summary.json`, `report.md`, and `git worktree list` cleanup. Any change to artifact persistence contracts must be verified by updating these assertions.
+Build a temp git repo with at least 2 distinct feature areas and lightweight repo-local tests. Assert the real artifact structure from `docs/run-artifacts.md`: `plan.json`, `features.json`, `round-0/`, subsequent rounds, `baseline-rejudge-loop-N/`, loop artifacts including `doc-gates-loop-N.json`, `summary.json`, `report.md`, and `git worktree list` cleanup. Any change to artifact persistence contracts must be verified by updating these assertions.
 
 ## Preserving Failed E2E Runs
 
