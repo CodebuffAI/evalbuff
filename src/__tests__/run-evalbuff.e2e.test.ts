@@ -403,6 +403,9 @@ describe('Evalbuff pipeline e2e', () => {
       const docsStatePath = path.join(logDir, 'docs-state-loop-1.json')
       expect(fs.existsSync(docsStatePath)).toBe(true)
 
+      const docGatesPath = path.join(logDir, 'doc-gates-loop-1.json')
+      expect(fs.existsSync(docGatesPath)).toBe(true)
+
       // --- Verify overall summary ---
       const summaryPath = path.join(logDir, 'summary.json')
       expect(fs.existsSync(summaryPath)).toBe(true)

@@ -16,6 +16,7 @@ $TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
 │       ├── trace.txt.sidecars/        # Extracted large payloads + manifest.json
 │       ├── diff.txt                   # Agent's unified diff
 │       ├── judging.json               # Full JudgingResult from the judge agent
+│       ├── agent-suggestions.json     # Coding agent doc/project suggestions
 │       └── score.txt                  # Single number (overallScore)
 │
 ├── round-1/                           # Loop 1 re-eval (same structure as round-0)
@@ -27,9 +28,10 @@ $TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
 │       ├── judging.json               # Re-judged result (trace/diff not re-persisted)
 │       └── score.txt
 │
-├── judge-suggestions-loop-1.txt       # Raw judge suggestions fed to docs writer
-├── docs-diff-loop-1.txt              # Before/after diff of docs for loop 1
-├── docs-state-loop-1.json            # Snapshot of all docs after loop 1
+├── judge-suggestions-loop-1.txt       # Human-readable summary of accepted/rejected/overfit-skipped doc candidates
+├── doc-gates-loop-1.json              # Detailed per-candidate gate results for loop 1, including overfit and low-priority rejections
+├── docs-diff-loop-1.txt               # Before/after diff of docs for loop 1
+├── docs-state-loop-1.json             # Snapshot of all docs after loop 1
 │
 ├── summary.json                       # EvalSummary — the top-level run summary
 └── report.md                          # Human-readable markdown report
@@ -43,6 +45,8 @@ $TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
 - `rounds[]` — `{ round, avgScore, scores: Record<featureId, number>, totalCost }`
 - `totalCost`, `scoreProgression: number[]`
 - `baselineRejudgeProgression?: number[]`
+- `consideredDocChangesByLoop?: number[]`
+- `acceptedDocChangesByLoop?: number[]`
 
 **`round-N/summary.json`** (per-round):
 - `round`, `avgScore`, `totalCost`
@@ -56,9 +60,10 @@ $TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
 
 ## Loop Artifact Timing
 
-Loop artifacts (`judge-suggestions-loop-N.txt`, `docs-diff-loop-N.txt`, `docs-state-loop-N.json`) are written at the **log-dir root** during the docs-writer step, **before** the corresponding `round-N/` directory is created by `saveRoundResults()`. This means:
+Loop artifacts (`judge-suggestions-loop-N.txt`, `doc-gates-loop-N.json`, `docs-diff-loop-N.txt`, `docs-state-loop-N.json`) are written at the **log-dir root** after the sequential doc-gating pass, **before** the corresponding `round-N/` directory is created by `saveRoundResults()`. This means:
 
-- `judge-suggestions-loop-N.txt` is written only when suggestions exist.
+- `judge-suggestions-loop-N.txt` should exist for every completed loop, even if it is empty.
+- `doc-gates-loop-N.json` contains every considered docs candidate for the loop, including accepted/rejected status, overfit/low-priority filtering, and rejudge/rerun scores when applicable.
 - `docs-diff-loop-N.txt` must always exist after the docs-writer step — empty string when nothing changed.
 - `docs-state-loop-N.json` must always exist — contains the `getDocsSnapshot(repoPath)` result after refactoring.
 
@@ -77,7 +82,7 @@ The TUI data loader in `src/tui/data.ts` exports `loadLogDir(logDir)` returning 
 - `report.md` → `string` (empty string if missing; powers summary/report screens)
 - `round-N/` directories → per-round feature data (scanned sequentially from 0, stops at first gap)
 - `baseline-rejudge-loop-N/` directories → re-judged baseline data
-- Root-level loop artifacts: `judge-suggestions-loop-N.txt`, `docs-diff-loop-N.txt`, `docs-state-loop-N.json`
+- Root-level loop artifacts: `judge-suggestions-loop-N.txt`, `doc-gates-loop-N.json`, `docs-diff-loop-N.txt`, `docs-state-loop-N.json`
 
 Per-feature task data comes from child directories (`round-N/<featureId>/score.txt`, `judging.json`, `diff.txt`, `trace.txt`) — not reconstructed from `summary.json`. Missing singular artifacts return `null`, missing collections return `[]`. Loaders must prefer per-feature files over round summaries so partial runs render progressively.
 
@@ -101,7 +106,7 @@ Live/watch UIs must refresh on **any** progressive artifact change, not only whe
 - `score.txt` or `judging.json` is written inside an existing round
 - `round-N/summary.json` is written
 - Top-level `summary.json` is written
-- Root-level loop artifacts appear (before their corresponding round directory)
+- Root-level loop artifacts appear (before their corresponding round directory), including `doc-gates-loop-N.json`
 
 Cumulative metrics like `totalCost` from `round_complete` events are **run totals**, never per-round deltas. The UI must never let displayed cumulative values decrease between rounds.
 
@@ -123,4 +128,4 @@ Both values must appear as visible labeled lines in the report. Per-round detail
 
 **Trace compression**: `saveRoundResults()` writes raw `trace.txt` first, then kicks off async `compressAndSave(tracePath, trace)` so `trace.txt.compressed` and `trace.txt.sidecars/manifest.json` appear later without blocking the round. Compression failures emit a warning but must not fail the round.
 
-Always-present sections: Overview table, Score Trajectory, Scores by Round, per-round feature detail (score breakdown, analysis, strengths, weaknesses, E2E tests, docs read, doc suggestions, cost). Optional sections: Baseline Rejudge Trajectory, Baseline Scored by Each Loop's Docs, Judge Suggestions Applied, Docs Changes (per loop), and Final Documentation State.
+Always-present sections: Overview table, Score Trajectory, Scores by Round, per-round feature detail (score breakdown, analysis, strengths, weaknesses, E2E tests, docs read, doc suggestions, cost). Optional sections: Baseline Rejudge Trajectory, Baseline Scored by Each Loop's Docs, Doc Gate Summary, Per-Candidate Doc Gates, Docs Changes (per loop), and Final Documentation State.

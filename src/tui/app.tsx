@@ -178,7 +178,7 @@ function DashboardView({ state, cursor, onSelect }: {
   onSelect: (id: string) => void
 }) {
   const pLabel = phaseLabel(state.phase, state.round, state.loop)
-  const pct = Math.round(phaseProgress(state.phase, state.round, state.loops || 3) * 100)
+  const pct = Math.round(phaseProgress(state.phase, state.round, state.loops || 1) * 100)
   const repoName = state.repoPath.split('/').pop() || state.repoPath
 
   return (

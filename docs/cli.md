@@ -3,18 +3,18 @@
 ## Main Pipeline
 
 ```bash
-bun run src/run-evalbuff.ts \
+  bun run src/run-evalbuff.ts \
   --repo /path/to/repo \
   [--n 20] \
-  [--parallelism 10] \
-  [--loops 3] \
+  [--parallelism 1] \
+  [--loops 1] \
   [--init-command "npm install"] \
   [--coding-model sonnet] \
   [--docs-model opus] \
   [--cached-features /path/to/features.json]
 ```
 
-All flags are parsed explicitly in the `import.meta.main` block. Required flags must be validated with helpful errors. The `--cached-features` flag skips planning/carving and loads pre-carved features directly.
+All flags are parsed explicitly in the `import.meta.main` block. Required flags must be validated with helpful errors. The `--cached-features` flag skips planning/carving and loads pre-carved features directly. Improvement loops now run features sequentially and gate docs changes one candidate at a time; `--parallelism` still applies to carving/setup concurrency, not the per-loop feature order.
 
 ## Perfect Feature (Single-Feature Optimizer)
 

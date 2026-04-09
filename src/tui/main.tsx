@@ -369,8 +369,8 @@ async function main() {
 
     const repoPath = getArg('repo')
     const n = parseInt(getArg('n', '5'))
-    const parallelism = parseInt(getArg('parallelism', '10'))
-    const loops = parseInt(getArg('loops', '3'))
+    const parallelism = parseInt(getArg('parallelism', '1'))
+    const loops = parseInt(getArg('loops', '1'))
     const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
     const codingModel = getArg('coding-model', 'sonnet')
     const docsModel = getArg('docs-model', 'opus')

@@ -4,11 +4,12 @@ import os from 'os'
 import path from 'path'
 
 import { ClaudeRunner } from './runners/claude'
+import { buildCodingAgentPrompt, CODING_AGENT_SUGGESTIONS_FILE, readCodingAgentSuggestions } from './docs-writer'
 import { judgeTaskResult } from './judge'
 import { applyCarveOperations, copyDocsIntoRepo, ensureGitIdentity, extractDocsRead } from './eval-helpers'
 
 import type { CarvedFeature } from './carve-features'
-import type { JudgingResult } from './judge'
+import type { JudgingResult, Suggestion } from './judge'
 import type { RunnerResult } from './runners/runner'
 
 import { execFileSync } from 'child_process'
@@ -22,6 +23,22 @@ export interface TaskResult {
   judging: JudgingResult
   costEstimate: number
   docsRead: string[]
+  agentDocSuggestions: Suggestion[]
+  agentProjectSuggestions: Suggestion[]
+}
+
+type RunAgentOnCarveDeps = {
+  createRunner: (repoDir: string, model: string) => { run: (prompt: string) => Promise<RunnerResult> }
+  buildCodingAgentPrompt: typeof buildCodingAgentPrompt
+  judgeTaskResult: typeof judgeTaskResult
+  readCodingAgentSuggestions: typeof readCodingAgentSuggestions
+}
+
+const defaultRunAgentOnCarveDeps: RunAgentOnCarveDeps = {
+  createRunner: (repoDir, model) => new ClaudeRunner(repoDir, {}, model, 'medium'),
+  buildCodingAgentPrompt,
+  judgeTaskResult,
+  readCodingAgentSuggestions,
 }
 
 export async function runAgentOnCarve(opts: {
@@ -33,7 +50,7 @@ export async function runAgentOnCarve(opts: {
   model: string
   groundTruthDiff: string
   docsSourcePath: string
-}): Promise<TaskResult> {
+}, deps: RunAgentOnCarveDeps = defaultRunAgentOnCarveDeps): Promise<TaskResult> {
   const { idx, total, repoPath, feature, initCommand, model, groundTruthDiff, docsSourcePath } = opts
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-eval-'))
@@ -66,14 +83,24 @@ export async function runAgentOnCarve(opts: {
         }
       }
 
-      const runner = new ClaudeRunner(repoDir, {}, model, 'medium')
+      const runner = deps.createRunner(repoDir, model)
 
       let result: RunnerResult
       try {
-        result = await runner.run(feature.prompt)
+        result = await runner.run(deps.buildCodingAgentPrompt(feature.prompt))
       } catch (runError) {
         return createInfrastructureFailureResult(feature, runError)
       }
+
+      const agentSuggestions = deps.readCodingAgentSuggestions(repoDir)
+      try {
+        fs.rmSync(path.join(repoDir, CODING_AGENT_SUGGESTIONS_FILE), { force: true })
+      } catch {
+        // Ignore cleanup failures
+      }
+      // Preserve the runner's diff, which may already be captured relative to
+      // the pre-run base SHA and can include committed agent changes.
+      const diff = result.diff
 
       // Raw JSONL trace — compression happens later when the trace is saved
       // to disk by saveRoundResults() in report.ts via compressAndSave().
@@ -83,9 +110,9 @@ export async function runAgentOnCarve(opts: {
       let judging: JudgingResult
       try {
         judging = await Promise.race([
-          judgeTaskResult({
+          deps.judgeTaskResult({
             taskPrompt: feature.prompt,
-            agentDiff: result.diff,
+            agentDiff: diff,
             groundTruthDiff,
             repoDir: repoDir,
           }),
@@ -111,11 +138,13 @@ export async function runAgentOnCarve(opts: {
         featureId: feature.id,
         prompt: feature.prompt,
         score: judging.overallScore,
-        diff: result.diff,
+        diff,
         trace: agentTrace,
         judging,
         costEstimate: result.totalCostUsd,
         docsRead: extractDocsRead(result.steps),
+        agentDocSuggestions: agentSuggestions.docSuggestions,
+        agentProjectSuggestions: agentSuggestions.projectSuggestions,
       }
     } catch (error) {
       return createInfrastructureFailureResult(feature, error)
@@ -128,7 +157,7 @@ export async function runAgentOnCarve(opts: {
 }
 
 /**
- * Re-judge a baseline task using the current docs in docsSourcePath.
+ * Re-judge a task using the current docs in docsSourcePath.
  *
  * Recreates the exact repo state the original judge saw (carved repo + agent's
  * baseline diff applied), but with whatever docs currently live in
@@ -136,17 +165,17 @@ export async function runAgentOnCarve(opts: {
  * judge itself scores differently once given better docs, independent of any
  * agent behavior change.
  */
-export async function rejudgeBaselineWithCurrentDocs(opts: {
+export async function rejudgeTaskWithCurrentDocs(opts: {
   idx: number
   total: number
   repoPath: string
   feature: CarvedFeature
-  baselineDiff: string
+  agentDiff: string
   groundTruthDiff: string
   initCommand?: string
   docsSourcePath: string
 }): Promise<JudgingResult> {
-  const { idx, total, repoPath, feature, baselineDiff, groundTruthDiff, initCommand, docsSourcePath } = opts
+  const { idx, total, repoPath, feature, agentDiff, groundTruthDiff, initCommand, docsSourcePath } = opts
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-rejudge-'))
   const repoDir = path.join(tempDir, 'repo')
@@ -167,9 +196,9 @@ export async function rejudgeBaselineWithCurrentDocs(opts: {
     copyDocsIntoRepo(docsSourcePath, repoDir)
 
     // Apply the baseline agent's diff to reproduce the state the judge saw
-    if (baselineDiff.trim()) {
+    if (agentDiff.trim()) {
       const patchPath = path.join(tempDir, 'baseline.patch')
-      fs.writeFileSync(patchPath, baselineDiff.endsWith('\n') ? baselineDiff : baselineDiff + '\n')
+      fs.writeFileSync(patchPath, agentDiff.endsWith('\n') ? agentDiff : agentDiff + '\n')
       try {
         execFileSync('git', ['apply', '--whitespace=nowarn', '--allow-empty', patchPath], {
           cwd: repoDir,
@@ -197,7 +226,7 @@ export async function rejudgeBaselineWithCurrentDocs(opts: {
     return await Promise.race([
       judgeTaskResult({
         taskPrompt: feature.prompt,
-        agentDiff: baselineDiff,
+        agentDiff,
         groundTruthDiff,
         repoDir,
       }),
@@ -210,6 +239,22 @@ export async function rejudgeBaselineWithCurrentDocs(opts: {
       fs.rmSync(tempDir, { recursive: true, force: true })
     } catch { /* ignore */ }
   }
+}
+
+export async function rejudgeBaselineWithCurrentDocs(opts: {
+  idx: number
+  total: number
+  repoPath: string
+  feature: CarvedFeature
+  baselineDiff: string
+  groundTruthDiff: string
+  initCommand?: string
+  docsSourcePath: string
+}): Promise<JudgingResult> {
+  return rejudgeTaskWithCurrentDocs({
+    ...opts,
+    agentDiff: opts.baselineDiff,
+  })
 }
 
 function createInfrastructureFailureResult(
@@ -235,5 +280,7 @@ function createInfrastructureFailureResult(
     },
     costEstimate: 0,
     docsRead: [],
+    agentDocSuggestions: [],
+    agentProjectSuggestions: [],
   }
 }

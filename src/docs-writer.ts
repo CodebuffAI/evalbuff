@@ -1,23 +1,182 @@
-import { execSync } from 'child_process'
+import { execFileSync, execSync } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 
+import { z } from 'zod/v4'
+
 import { ClaudeRunner } from './runners/claude'
-import { syncDocsIntoRepo } from './eval-helpers'
+import { computeDocsDiffText, copyDocsIntoRepo, ensureGitIdentity, getDocsSnapshot, syncDocsIntoRepo } from './eval-helpers'
+import { SuggestionSchema } from './judge'
 
 import type { TaskResult } from './eval-runner'
+import type { Suggestion } from './judge'
 
-export function collectDocSuggestions(tasks: TaskResult[]): string {
+export type SuggestionSource = 'judge' | 'agent' | 'judge+agent'
+
+export interface IndependentSuggestion extends Suggestion {
+  source: SuggestionSource
+}
+
+export interface CodingAgentSuggestions {
+  docSuggestions: Suggestion[]
+  projectSuggestions: Suggestion[]
+}
+
+export interface DraftedDocsChange {
+  tempDir: string
+  repoDir: string
+  before: Record<string, string>
+  after: Record<string, string>
+  diffText: string
+}
+
+export interface PlannedDocsChange {
+  text: string
+  priority: number
+  source: SuggestionSource
+  accepted: boolean
+  reason: string
+  overfit: boolean
+  branchName?: string
+  commitSha?: string
+  patchText?: string
+  diffText?: string
+}
+
+export interface PlannedDocsTaskResult {
+  tempDir: string
+  repoDir: string
+  baseCommit: string
+  candidates: PlannedDocsChange[]
+}
+
+export const CODING_AGENT_SUGGESTIONS_FILE = 'evalbuff-coding-suggestions.json'
+const DOCS_WRITER_PLAN_FILE = 'evalbuff-doc-changes-plan.json'
+export const DEFAULT_DOC_SUGGESTION_PRIORITY_FLOOR = 40
+const DOCS_WRITER_FAILURE_PREFIX = 'evalbuff-docs-writer-failure-'
+
+const CodingAgentSuggestionsSchema = z.object({
+  docSuggestions: z.array(SuggestionSchema).default([]),
+  projectSuggestions: z.array(SuggestionSchema).default([]),
+})
+
+const DocsWriterPlanEntrySchema = z.object({
+  text: z.string(),
+  priority: z.number().min(0).max(100),
+  source: z.enum(['judge', 'agent', 'judge+agent']),
+  accepted: z.boolean(),
+  reason: z.string(),
+  overfit: z.boolean().default(false),
+  branchName: z.string().optional(),
+  commitSha: z.string().optional(),
+})
+
+const DocsWriterPlanSchema = z.object({
+  candidates: z.array(DocsWriterPlanEntrySchema).default([]),
+})
+
+function mergeSuggestions(
+  entries: Array<{ source: 'judge' | 'agent'; suggestion: Suggestion }>,
+): IndependentSuggestion[] {
+  const merged = new Map<string, IndependentSuggestion>()
+
+  for (const entry of entries) {
+    const key = entry.suggestion.text.trim().toLowerCase()
+    const existing = merged.get(key)
+    if (!existing) {
+      merged.set(key, {
+        ...entry.suggestion,
+        source: entry.source,
+      })
+      continue
+    }
+
+    const nextSource: SuggestionSource =
+      existing.source === entry.source ? existing.source : 'judge+agent'
+
+    merged.set(key, {
+      text: existing.text,
+      priority: Math.max(existing.priority, entry.suggestion.priority),
+      source: nextSource,
+    })
+  }
+
+  return [...merged.values()].sort((a, b) => b.priority - a.priority)
+}
+
+export function buildCodingAgentPrompt(taskPrompt: string): string {
+  return `${taskPrompt}
+
+After you finish the coding task, write JSON to \`${CODING_AGENT_SUGGESTIONS_FILE}\` in the repo root with this exact shape:
+
+\`\`\`json
+{
+  "docSuggestions": [
+    { "text": "one independent docs change", "priority": 70 }
+  ],
+  "projectSuggestions": [
+    { "text": "one independent project change", "priority": 55 }
+  ]
+}
+\`\`\`
+
+Rules for the suggestions file:
+- Each entry must be an independent suggestion that can be implemented on its own.
+- \`docSuggestions\` must focus on general documentation changes that would help future coding agents or reviewers succeed on similar tasks.
+- \`projectSuggestions\` must describe project changes (source, tests, infra, cleanup), not docs changes.
+- Use priorities from 0-100.
+- If you have no suggestions for a category, write an empty array for it.
+- Write the file as your last action.`
+}
+
+export function readCodingAgentSuggestions(repoDir: string): CodingAgentSuggestions {
+  const resultPath = path.join(repoDir, CODING_AGENT_SUGGESTIONS_FILE)
+  try {
+    if (!fs.existsSync(resultPath)) {
+      return { docSuggestions: [], projectSuggestions: [] }
+    }
+    const raw = JSON.parse(fs.readFileSync(resultPath, 'utf-8'))
+    const parsed = CodingAgentSuggestionsSchema.safeParse(raw)
+    if (!parsed.success) {
+      return { docSuggestions: [], projectSuggestions: [] }
+    }
+    return parsed.data
+  } catch {
+    return { docSuggestions: [], projectSuggestions: [] }
+  }
+}
+
+export function collectTaskDocSuggestions(task: TaskResult): IndependentSuggestion[] {
+  return mergeSuggestions([
+    ...(task.judging.docSuggestions || []).map((suggestion) => ({
+      source: 'judge' as const,
+      suggestion,
+    })),
+    ...task.agentDocSuggestions.map((suggestion) => ({
+      source: 'agent' as const,
+      suggestion,
+    })),
+  ])
+}
+
+export function filterDocSuggestionsForPlanning(
+  suggestions: IndependentSuggestion[],
+  minPriority: number = DEFAULT_DOC_SUGGESTION_PRIORITY_FLOOR,
+): IndependentSuggestion[] {
+  return suggestions.filter((suggestion) => suggestion.priority >= minPriority)
+}
+
+export function renderDocSuggestions(tasks: TaskResult[]): string {
   const sections: string[] = []
 
   for (const task of tasks) {
-    const suggestions = task.judging.docSuggestions
+    const suggestions = collectTaskDocSuggestions(task)
     if (!suggestions || suggestions.length === 0) continue
 
     sections.push(
       `### ${task.featureId} (score: ${task.score.toFixed(1)}/10)\n` +
-      suggestions.map((s) => `- [priority ${s.priority}] ${s.text}`).join('\n'),
+      suggestions.map((s) => `- [${s.source}] [priority ${s.priority}] ${s.text}`).join('\n'),
     )
   }
 
@@ -28,103 +187,70 @@ export function collectProjectSuggestions(tasks: TaskResult[]): string {
   const sections: string[] = []
 
   for (const task of tasks) {
-    const suggestions = task.judging.projectSuggestions
+    const suggestions = mergeSuggestions([
+      ...((task.judging.projectSuggestions || []).map((suggestion) => ({
+        source: 'judge' as const,
+        suggestion,
+      }))),
+      ...task.agentProjectSuggestions.map((suggestion) => ({
+        source: 'agent' as const,
+        suggestion,
+      })),
+    ])
     if (!suggestions || suggestions.length === 0) continue
 
     sections.push(
       `### ${task.featureId} (score: ${task.score.toFixed(1)}/10)\n` +
-      suggestions.map((s) => `- [priority ${s.priority}] ${s.text}`).join('\n'),
+      suggestions.map((s) => `- [${s.source}] [priority ${s.priority}] ${s.text}`).join('\n'),
     )
   }
 
   return sections.join('\n\n')
 }
 
-export async function runDocsWriterAgent(
+export async function planDocsChangesForTask(
   repoPath: string,
-  judgeSuggestions: string,
+  suggestions: IndependentSuggestion[],
   model: string,
-): Promise<void> {
+  minPriority: number = DEFAULT_DOC_SUGGESTION_PRIORITY_FLOOR,
+): Promise<PlannedDocsTaskResult | null> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-docs-'))
   const repoDir = path.join(tempDir, 'repo')
+  let prompt = ''
+  let runnerResult: Awaited<ReturnType<ClaudeRunner['run']>> | null = null
+  let baseCommit = ''
+  let lastError: unknown = null
 
-  const prompt = `Read ALL existing documentation (docs/, AGENTS.md, CLAUDE.md), consider the judge suggestions below, and make the documentation as useful as possible for coding agents.
-
-## Goal
-
-The purpose of these docs is to help a coding agent successfully build NEW features it has never seen before, AND to help reviewers verify that changes actually work. The docs should teach the agent how the project works — its architecture, patterns, conventions, and rules — so it can confidently build anything, not just reconstruct specific existing features. They should also document testing strategies, verification processes, and end-to-end testing approaches that help reviewers evaluate changes beyond just reading the diff.
-
-## Judge Suggestions
-
-Multiple judge agents reviewed coding agent attempts and identified documentation gaps. Here are their suggestions, each tagged with a priority score (0-100). Higher priority means more impactful. When the same suggestion appears multiple times across features, that's a signal it deserves higher effective priority.
-
-**Focus on suggestions with priority 40+. Ignore suggestions with priority below 20 unless they appear multiple times.** Low-priority suggestions are minor nice-to-haves that aren't worth the docs clutter.
-
-${judgeSuggestions || '(No suggestions were made)'}
-
-## What to do
-
-1. **Extract general patterns** — each judge suggestion reflects a specific failure, but your job is to identify the underlying pattern or convention that would prevent a whole class of similar failures. Ask: "What general rule would help an agent get this right for ANY feature?" Some suggestions are about testing/verification strategies for reviewers — treat those as equally important and document them in the appropriate docs (e.g., docs/testing.md or similar).
-2. **Do NOT reference specific features** — never mention a specific feature, component, or endpoint by name as an example of what to build. Instead, document the pattern it follows. For example, instead of "the UserProfile component fetches data in useEffect", write "components in this project fetch data using useEffect on mount, following the pattern in src/hooks/".
-3. **Document architecture and data flow** — describe how the project is structured, how data flows through it, and where new code should be placed. These are the things an agent building something new needs most.
-4. **Edit existing docs** — when a suggestion maps to an existing doc, make fine-grained edits rather than rewriting from scratch.
-5. **Create new docs** — when a suggestion identifies a missing pattern or convention, create a concise new doc for it.
-6. **Merge overlapping docs** — if multiple suggestions or existing docs cover similar topics, combine them.
-7. **Remove redundancy** — consolidate duplicate advice. Dense, actionable information beats verbose explanations.
-8. **Fix contradictions** — if docs disagree, pick the correct advice and remove the wrong one.
-9. **Prune stale docs** — remove docs that reference files/patterns that no longer exist in the codebase.
-
-Rules:
-- ONLY modify files in docs/, AGENTS.md, or CLAUDE.md. Do NOT modify source code.
-- **Do NOT edit AGENTS.md beyond adding new docs to its index.** The only allowed changes to AGENTS.md are: (a) adding/removing entries in the doc index when you create or delete files under docs/, and (b) correcting existing information that is factually wrong. Do NOT add new paragraphs, prose, sections, or explanatory text above or below existing content. Put all new guidance in docs/ files and link to them from the index.
-- It's OK to delete doc files that are redundant or low-value.
-- The goal is a minimal, high-signal set of docs that a coding agent can use to build ANY feature, including ones that don't exist yet.
-- Less is more — 5 great docs are better than 15 mediocre ones.
-- Document patterns, conventions, and architectural rules — not specific feature implementations.
-- Be specific about file paths, directory structure, and conventions — but generic about what gets built.
-
-## Docs Must Match Source Code
-
-Docs that describe nonexistent code are WORSE than no docs at all — they actively mislead coding agents and cause them to fail.
-
-Before writing any doc that references a helper, function, type, or script:
-1. **grep for the exact symbol name** to confirm it exists. If it doesn't exist, DO NOT document it.
-2. **Never document aspirational/future behavior.** Only document what the code does RIGHT NOW.
-3. **If a judge suggestion references a helper that doesn't exist**, document the PATTERN the agent should follow instead — not a fictional API.
-
-Wrong: "Use \`captureGitDiff()\` from src/eval-helpers.ts to capture diffs"  (if it doesn't exist)
-Right: "Diff capture should use an explicit base SHA recorded before the agent runs"  (describes the pattern)
-
-## Final Step: Spawn a Critique Sub-Agent
-
-Before you finish, you MUST spawn a critique sub-agent via the Task tool (subagent_type: "general-purpose") to review the docs you just wrote or modified. Then apply every valid fix it identifies.
-
-Use this exact prompt for the sub-agent:
-
----
-You are a documentation critic. Review every file under docs/, plus AGENTS.md and CLAUDE.md, and report violations of the rules below. For each violation, give the file path, the offending text or line range, and a concrete fix (exact replacement text, the section to remove, or the split to perform).
-
-Rules (enforce strictly):
-
-1. **No overfitting to a single task.** Docs must describe general patterns, conventions, and architecture that apply to building ANY feature — not one specific task. Flag:
-   - Feature-specific function, type, component, endpoint, table, or CLI-subcommand names that only matter for one task and are not shared infrastructure.
-   - Examples phrased around one feature ("the UserProfile component fetches data via useEffect") instead of the general pattern ("components in src/components/ fetch data in useEffect on mount").
-   - Any symbol reference that does not represent a shared utility, pattern, or architectural boundary used by multiple features.
-   The fix is to rewrite the passage as a general rule about the pattern, directory, or convention — or delete it if it does not generalize.
-
-2. **No code excerpts unless documenting a common utility or shared pattern.** A code block is only allowed when it shows:
-   - The signature or usage of a shared helper multiple features rely on, OR
-   - A canonical pattern every agent should copy (error handling, a standard import shape, etc.).
-   Flag any code block that shows task-specific implementation details. The fix is to delete the block or replace it with a one-line prose description of the pattern.
-
-3. **Individual markdown files must stay focused and reasonably short.** If any single file exceeds roughly 300 lines, OR covers multiple unrelated topics, recommend splitting it into smaller topic-scoped files and specify the split (new filenames + which sections move where). Prefer many small focused docs over one large doc.
-
-4. **Docs must match source code.** Before flagging a missing symbol, grep the repo to confirm it does not exist. Flag references to helpers, functions, types, files, or scripts that are not present in the code.
-
-Return a numbered list of violations with fixes. If a file is clean, say so. Do not edit any files yourself — only report.
----
-
-After the sub-agent returns, apply every valid fix it identified by editing the doc files directly. If it recommended splitting a long doc, perform the split. Re-read each affected file after fixing to confirm the result. Only then finish.`
+  function preserveFailure(reason: string): void {
+    try {
+      const failureDir = fs.mkdtempSync(path.join(os.tmpdir(), DOCS_WRITER_FAILURE_PREFIX))
+      fs.writeFileSync(path.join(failureDir, 'reason.txt'), reason)
+      fs.writeFileSync(path.join(failureDir, 'prompt.txt'), prompt)
+      if (lastError) {
+        const errorText = lastError instanceof Error
+          ? `${lastError.name}: ${lastError.message}\n${lastError.stack || ''}`.trim()
+          : String(lastError)
+        fs.writeFileSync(path.join(failureDir, 'error.txt'), errorText + '\n')
+      }
+      if (runnerResult) {
+        fs.writeFileSync(
+          path.join(failureDir, 'trace.txt'),
+          runnerResult.steps.map((step) => JSON.stringify(step)).join('\n'),
+        )
+        fs.writeFileSync(path.join(failureDir, 'diff.txt'), runnerResult.diff)
+      }
+      if (fs.existsSync(repoDir)) {
+        fs.renameSync(tempDir, path.join(failureDir, 'workspace'))
+      }
+      console.error(`Preserved docs-writer failure bundle at ${failureDir}`)
+    } catch {
+      try {
+        cleanupPlannedDocsTaskResult({ tempDir, repoDir, baseCommit, candidates: [] })
+      } catch {
+        // ignore cleanup failures
+      }
+    }
+  }
 
   try {
     execSync(`git clone --no-checkout "${repoPath}" "${repoDir}"`, { stdio: 'ignore' })
@@ -133,20 +259,208 @@ After the sub-agent returns, apply every valid fix it identified by editing the 
       encoding: 'utf-8',
     }).trim()
     execSync(`git checkout ${headSha}`, { cwd: repoDir, stdio: 'ignore' })
+    ensureGitIdentity(repoDir)
+    copyDocsIntoRepo(repoPath, repoDir)
+    baseCommit = execSync('git rev-parse HEAD', {
+      cwd: repoDir,
+      encoding: 'utf-8',
+    }).trim()
 
-    syncDocsIntoRepo(repoPath, repoDir)
+    prompt = `Read ALL existing documentation (docs/, AGENTS.md, CLAUDE.md) once, then plan and implement a set of independent candidate documentation changes.
+
+## Candidate Suggestions
+
+${suggestions.length > 0
+    ? suggestions.map((suggestion, index) => (
+      `${index + 1}. [${suggestion.source}] [priority ${suggestion.priority}] ${suggestion.text}`
+    )).join('\n')
+    : '(No suggestions were provided)'}
+
+## Required filtering
+
+You must reject a suggestion instead of editing docs when ANY of the following is true:
+- It is overfit to just the current task and would not help future unrelated tasks.
+- It mainly documents a task-specific fix rather than a reusable project pattern.
+- It is already covered by the current docs.
+- It is too low priority to justify docs churn. Treat priorities below ${minPriority} as low priority unless the suggestion is clearly critical anyway.
+- It would require documenting nonexistent or aspirational behavior.
+
+## Implementation workflow
+
+1. Read the current docs first.
+2. Immediately create \`${DOCS_WRITER_PLAN_FILE}\` in the repo root with one entry per suggestion. Start with every entry marked \`accepted: false\` and a placeholder \`reason\`. Update this file as you make decisions. Do not wait until the end to create it.
+3. Evaluate every suggestion and decide whether it should be accepted.
+4. For each accepted suggestion:
+   - Run \`git checkout --quiet ${baseCommit}\`
+   - Run \`git checkout -B evalbuff-doc-change-N\`
+   - Implement exactly one independent docs change.
+   - Keep it general, reusable, and not overfit.
+   - Run \`git add docs AGENTS.md CLAUDE.md\`
+   - Run \`git commit -m "evalbuff: doc change N"\`
+   - Record the branch name and commit SHA in \`${DOCS_WRITER_PLAN_FILE}\`
+   - Run \`git checkout --quiet ${baseCommit}\` before moving to the next suggestion so branches stay independent.
+5. For each rejected suggestion, make no docs changes and record the rejection reason in \`${DOCS_WRITER_PLAN_FILE}\`.
+6. Before finishing, ensure HEAD is back at \`${baseCommit}\`.
+
+## Required output shape
+
+\`\`\`json
+{
+  "candidates": [
+    {
+      "text": "original suggestion text",
+      "priority": 70,
+      "source": "judge",
+      "accepted": true,
+      "reason": "Why this is broadly useful and not overfit",
+      "overfit": false,
+      "branchName": "evalbuff-doc-change-1",
+      "commitSha": "abc123"
+    },
+    {
+      "text": "another suggestion",
+      "priority": 20,
+      "source": "agent",
+      "accepted": false,
+      "reason": "Rejected because this is overfit to one task",
+      "overfit": true
+    }
+  ]
+}
+\`\`\`
+
+Rules:
+- ONLY modify docs/, AGENTS.md, or CLAUDE.md.
+- Do NOT modify source code.
+- Every accepted branch must stand on its own when diffed against \`${baseCommit}\`.
+- Keep AGENTS.md changes limited to doc-index maintenance or factual corrections.
+- Verify referenced helpers, scripts, file paths, and symbols against the codebase before documenting them.
+- Do not document aspirational behavior.
+- If all suggestions are rejected, still write the JSON file with every rejection recorded.
+- The \`reason\` field must explicitly say why a rejected suggestion is overfit or low value when that applies.`
 
     const runner = new ClaudeRunner(repoDir, {}, model, 'high')
-    await runner.run(prompt)
-    syncDocsIntoRepo(repoDir, repoPath)
-  } catch {
-    // Failure is handled by the caller via missing docs changes
-  } finally {
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true })
-    } catch {
-      // ignore cleanup failures
+    runnerResult = await runner.run(prompt)
+
+    const planPath = path.join(repoDir, DOCS_WRITER_PLAN_FILE)
+    if (!fs.existsSync(planPath)) {
+      preserveFailure('Missing evalbuff-doc-changes-plan.json after docs-writer run')
+      return null
     }
+
+    const raw = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
+    const parsed = DocsWriterPlanSchema.safeParse(raw)
+    if (!parsed.success) {
+      preserveFailure('Invalid evalbuff-doc-changes-plan.json shape')
+      return null
+    }
+
+    const candidates: PlannedDocsChange[] = []
+    for (const entry of parsed.data.candidates) {
+      const planned: PlannedDocsChange = {
+        ...entry,
+      }
+
+      if (entry.accepted && entry.branchName) {
+        try {
+          const patchText = execFileSync(
+            'git',
+            ['diff', '--binary', `${baseCommit}..${entry.branchName}`, '--', 'docs', 'AGENTS.md', 'CLAUDE.md'],
+            { cwd: repoDir, encoding: 'utf-8' },
+          )
+          execFileSync('git', ['checkout', '--quiet', entry.branchName], { cwd: repoDir, stdio: 'ignore' })
+          const before = getDocsSnapshot(repoPath)
+          const after = getDocsSnapshot(repoDir)
+          const diffText = computeDocsDiffText(before, after)
+          execFileSync('git', ['checkout', '--quiet', baseCommit], { cwd: repoDir, stdio: 'ignore' })
+          planned.patchText = patchText
+          planned.diffText = diffText
+        } catch {
+          planned.accepted = false
+          planned.reason = `Rejected because the committed docs change could not be extracted: ${planned.reason}`
+          planned.overfit = planned.overfit || false
+          delete planned.branchName
+          delete planned.commitSha
+        }
+      }
+
+      candidates.push(planned)
+    }
+
+    return { tempDir, repoDir, baseCommit, candidates }
+  } catch (error) {
+    lastError = error
+    preserveFailure('Unhandled exception while planning docs changes')
+    return null
+  }
+}
+
+export function cleanupPlannedDocsTaskResult(result: PlannedDocsTaskResult): void {
+  try {
+    fs.rmSync(result.tempDir, { recursive: true, force: true })
+  } catch {
+    // ignore cleanup failures
+  }
+}
+
+export function materializeDocsChangeFromPatch(
+  repoPath: string,
+  patchText: string,
+): DraftedDocsChange | null {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-docs-materialized-'))
+  const repoDir = path.join(tempDir, 'repo')
+
+  try {
+    execSync(`git clone --no-checkout "${repoPath}" "${repoDir}"`, { stdio: 'ignore' })
+    const headSha = execSync('git rev-parse HEAD', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+    }).trim()
+    execSync(`git checkout ${headSha}`, { cwd: repoDir, stdio: 'ignore' })
+    ensureGitIdentity(repoDir)
+    copyDocsIntoRepo(repoPath, repoDir)
+
+    const before = getDocsSnapshot(repoDir)
+    const patchPath = path.join(tempDir, 'docs-change.patch')
+    fs.writeFileSync(patchPath, patchText.endsWith('\n') ? patchText : patchText + '\n')
+
+    try {
+      execFileSync('git', ['apply', '--whitespace=nowarn', '--allow-empty', patchPath], {
+        cwd: repoDir,
+        stdio: 'ignore',
+      })
+    } catch {
+      execFileSync('git', ['apply', '--3way', '--whitespace=nowarn', patchPath], {
+        cwd: repoDir,
+        stdio: 'ignore',
+      })
+    }
+
+    const after = getDocsSnapshot(repoDir)
+    const diffText = computeDocsDiffText(before, after)
+    return { tempDir, repoDir, before, after, diffText }
+  } catch {
+    cleanupDraftedDocsChange({ tempDir, repoDir, before: {}, after: {}, diffText: '' })
+    return null
+  }
+}
+
+export function acceptDraftedDocsChange(
+  repoPath: string,
+  draft: DraftedDocsChange,
+): string[] {
+  try {
+    return syncDocsIntoRepo(draft.repoDir, repoPath)
+  } finally {
+    cleanupDraftedDocsChange(draft)
+  }
+}
+
+export function cleanupDraftedDocsChange(draft: DraftedDocsChange): void {
+  try {
+    fs.rmSync(draft.tempDir, { recursive: true, force: true })
+  } catch {
+    // ignore cleanup failures
   }
 }
 

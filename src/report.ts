@@ -5,12 +5,50 @@ import { compressAndSave } from './trace-compressor'
 
 import type { TaskResult } from './eval-runner'
 import type { JudgingResult } from './judge'
+import type { SuggestionSource } from './docs-writer'
 
 export interface RoundResult {
   round: number
   tasks: TaskResult[]
   avgScore: number
   totalCost: number
+}
+
+export interface DocChangeGateCandidateResult {
+  source: SuggestionSource
+  priority: number
+  text: string
+  accepted: boolean
+  fastAccepted: boolean
+  status:
+    | 'accepted'
+    | 'accepted_fast_rejudge'
+    | 'rejected'
+    | 'rejected_overfit'
+    | 'rejected_no_change'
+    | 'rejected_writer_failed'
+    | 'rejected_rejudge_failed'
+    | 'rejected_rerun_failed'
+    | 'skipped_low_priority'
+  reason: string
+  baseScore: number
+  rejudgeScore?: number
+  rerunScore?: number
+  gateDelta?: number
+  docsDiff: string
+}
+
+export interface FeatureDocGateResult {
+  featureId: string
+  baseScore: number
+  candidates: DocChangeGateCandidateResult[]
+}
+
+export interface LoopDocGateResult {
+  loop: number
+  threshold: number
+  fastAcceptThreshold: number
+  features: FeatureDocGateResult[]
 }
 
 export interface EvalSummary {
@@ -31,6 +69,8 @@ export interface EvalSummary {
   // scoreProgression[0]. A flat or rising line here with a rising agent line
   // suggests the docs are improving the agent beyond just judge recalibration.
   baselineRejudgeProgression?: number[]
+  consideredDocChangesByLoop?: number[]
+  acceptedDocChangesByLoop?: number[]
   projectPrompts?: string[]
 }
 
@@ -65,6 +105,16 @@ export function saveBaselineRejudgeResults(logDir: string, roundResult: RoundRes
   fs.writeFileSync(path.join(roundDir, 'summary.json'), JSON.stringify(summary, null, 2))
 }
 
+export function saveLoopDocGateResults(
+  logDir: string,
+  loopResult: LoopDocGateResult,
+): void {
+  fs.writeFileSync(
+    path.join(logDir, `doc-gates-loop-${loopResult.loop}.json`),
+    JSON.stringify(loopResult, null, 2),
+  )
+}
+
 export function saveRoundResults(logDir: string, roundResult: RoundResult): void {
   const roundDir = path.join(logDir, `round-${roundResult.round}`)
   fs.mkdirSync(roundDir, { recursive: true })
@@ -85,6 +135,13 @@ export function saveRoundResults(logDir: string, roundResult: RoundResult): void
 
     fs.writeFileSync(path.join(taskDir, 'diff.txt'), task.diff)
     fs.writeFileSync(path.join(taskDir, 'judging.json'), JSON.stringify(task.judging, null, 2))
+    fs.writeFileSync(
+      path.join(taskDir, 'agent-suggestions.json'),
+      JSON.stringify({
+        docSuggestions: task.agentDocSuggestions,
+        projectSuggestions: task.agentProjectSuggestions,
+      }, null, 2),
+    )
     fs.writeFileSync(path.join(taskDir, 'score.txt'), task.score.toString())
   }
 
@@ -116,6 +173,7 @@ export function saveSummary(
   roundResults: RoundResult[],
   opts: EvalOptions,
   baselineRejudgeResults: RoundResult[] = [],
+  loopDocGateResults: LoopDocGateResult[] = [],
   projectPrompts: string[] = [],
 ): void {
   fs.writeFileSync(path.join(logDir, 'summary.json'), JSON.stringify(summary, null, 2))
@@ -139,6 +197,7 @@ export function saveSummary(
     `| **Improvement loops** | ${opts.loops} |`,
     `| **Coding model** | ${opts.codingModel} |`,
     `| **Docs model** | ${opts.docsModel} |`,
+    `| **Doc gate threshold** | ${loopDocGateResults[0]?.threshold?.toFixed(1) ?? 'n/a'} |`,
     `| **Total cost** | $${summary.totalCost.toFixed(2)} |`,
     '',
   )
@@ -237,6 +296,16 @@ export function saveSummary(
     push('')
   }
 
+  if (summary.acceptedDocChangesByLoop && summary.acceptedDocChangesByLoop.length > 0) {
+    push('## Doc Change Gating', '')
+    for (let i = 0; i < summary.acceptedDocChangesByLoop.length; i++) {
+      const accepted = summary.acceptedDocChangesByLoop[i]
+      const considered = summary.consideredDocChangesByLoop?.[i] ?? accepted
+      push(`- Loop ${i + 1}: accepted ${accepted}/${considered} candidate doc changes`)
+    }
+    push('')
+  }
+
   // --- Per-round detail ---
   for (const round of roundResults) {
     const roundLabel = round.round === 0 ? 'Baseline' : `Loop ${round.round}`
@@ -295,6 +364,12 @@ export function saveSummary(
         push('')
       }
 
+      if (task.agentDocSuggestions.length > 0) {
+        push('**Coding agent doc suggestions:**')
+        for (const s of task.agentDocSuggestions) push(`- [P${s.priority}] ${s.text}`)
+        push('')
+      }
+
       // Project suggestions
       const projSuggestions = task.judging.projectSuggestions
       if (projSuggestions && projSuggestions.length > 0) {
@@ -303,16 +378,22 @@ export function saveSummary(
         push('')
       }
 
+      if (task.agentProjectSuggestions.length > 0) {
+        push('**Coding agent project suggestions:**')
+        for (const s of task.agentProjectSuggestions) push(`- [P${s.priority}] ${s.text}`)
+        push('')
+      }
+
       push(`**Cost:** $${task.costEstimate.toFixed(2)}`, '')
     }
 
-    // Judge suggestions file for non-baseline rounds
+    // Doc gate summary for non-baseline rounds
     if (round.round > 0) {
       const suggestionsFile = path.join(logDir, `judge-suggestions-loop-${round.round}.txt`)
       if (fs.existsSync(suggestionsFile)) {
         const suggestionsText = fs.readFileSync(suggestionsFile, 'utf-8')
         if (suggestionsText.trim()) {
-          push(`### Judge Suggestions Applied (Loop ${round.round})`, '')
+          push(`### Doc Gate Summary (Loop ${round.round})`, '')
           push('```')
           push(suggestionsText)
           push('```', '')
@@ -331,6 +412,28 @@ export function saveSummary(
           push(diffText)
           push('```', '')
         }
+      }
+    }
+  }
+
+  if (loopDocGateResults.length > 0) {
+    push('## Per-Candidate Doc Gates', '')
+    for (const loopResult of loopDocGateResults) {
+      push(`### Loop ${loopResult.loop}`, '')
+      for (const feature of loopResult.features) {
+        if (feature.candidates.length === 0) continue
+        push(`#### ${feature.featureId}`, '')
+        for (const candidate of feature.candidates) {
+          const scores = [
+            `base ${candidate.baseScore.toFixed(1)}`,
+            candidate.rejudgeScore !== undefined ? `rejudge ${candidate.rejudgeScore.toFixed(1)}` : null,
+            candidate.rerunScore !== undefined ? `rerun ${candidate.rerunScore.toFixed(1)}` : null,
+          ].filter(Boolean).join(' -> ')
+          push(`- [${candidate.accepted ? 'accepted' : 'rejected'}] [${candidate.source}] [P${candidate.priority}] ${candidate.text}`)
+          push(`  ${scores}${candidate.gateDelta !== undefined ? ` | gate ${candidate.gateDelta >= 0 ? '+' : ''}${candidate.gateDelta.toFixed(1)}` : ''}`)
+          push(`  ${candidate.reason}`)
+        }
+        push('')
       }
     }
   }
