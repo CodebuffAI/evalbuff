@@ -9,10 +9,11 @@
   [--init-command "npm install"] \
   [--coding-model sonnet] \
   [--docs-model opus] \
-  [--cached-features /path/to/features.json]
+  [--cached-features /path/to/features.json] \
+  [--output-dir /path/to/output]
 ```
 
-All flags are parsed explicitly in the `import.meta.main` block. Required flags must be validated with helpful errors. The `--cached-features` flag skips planning/carving and loads pre-carved features directly. Evalbuff now always runs a single sequential improvement round after baseline, and carve concurrency is an internal fixed constant rather than a public flag.
+All flags are parsed explicitly in the `import.meta.main` block. Required flags must be validated with helpful errors. The `--cached-features` flag skips planning/carving and loads pre-carved features directly. The `--output-dir` flag overrides the default artifact location (`<repo>/.evalbuff`). Evalbuff now always runs a single sequential improvement round after baseline, and carve concurrency is an internal fixed constant rather than a public flag.
 
 ## Perfect Feature (Single-Feature Optimizer)
 
@@ -26,7 +27,8 @@ bun run src/perfect-feature.ts \
   [--judge-model opus] \
   [--analyzer-model opus] \
   [--docs-model opus] \
-  [--init-command "npm install"]
+  [--init-command "npm install"] \
+  [--output-dir /path/to/output]
 ```
 
 Iteratively rebuilds a single feature: rebuild → judge → diagnose → update docs → repeat until 10/10 or max rounds.
@@ -71,7 +73,7 @@ bun run tui -- --repo /path/to/repo            # Start a live run with TUI attac
 
 **Navigation**: `Enter` drills into detail screens, `Esc` goes back, `q` quits. Arrow keys and `j`/`k` navigate lists.
 
-**Run discovery**: On macOS, run directories may appear under both `os.tmpdir()` (which resolves through `/private/var/...`) and `/tmp`. Discovery logic must scan both locations to find all runs.
+**Run discovery**: The TUI scans `.evalbuff/` in the current working directory (the default output location) as well as legacy temp locations (`os.tmpdir()` and `/tmp` on macOS) to find all runs.
 
 ## CLI Conventions
 

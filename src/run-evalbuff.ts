@@ -14,7 +14,6 @@
  *   bun run src/run-evalbuff.ts --repo /path/to/repo [--n 5] [--init-command "npm install"]
  */
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 
 import { planFeatures, carveFeature } from './carve-features'
@@ -60,11 +59,27 @@ export interface EvalbuffOptions {
   codingModel: string  // model for coding agents (default: sonnet)
   docsModel: string    // model for docs agents (default: opus)
   cachedFeatures?: string  // path to a features.json from a previous run
+  outputDir?: string   // base directory for run artifacts (default: <repoPath>/.evalbuff)
 }
 
 const DOC_CHANGE_ACCEPTANCE_THRESHOLD = 0.5
 const DOC_CHANGE_FAST_ACCEPT_THRESHOLD = DOC_CHANGE_ACCEPTANCE_THRESHOLD * 2
 const CARVE_PARALLELISM = 10
+
+/** Ensure an entry exists in the repo's .gitignore. Creates the file if needed. */
+function ensureGitignore(repoPath: string, entry: string): void {
+  const gitignorePath = path.join(repoPath, '.gitignore')
+  try {
+    const content = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf-8') : ''
+    const lines = content.split('\n')
+    if (!lines.some(line => line.trim() === entry)) {
+      const suffix = content.length > 0 && !content.endsWith('\n') ? '\n' : ''
+      fs.appendFileSync(gitignorePath, `${suffix}${entry}\n`)
+    }
+  } catch {
+    // Best-effort — don't fail the run over .gitignore
+  }
+}
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -734,8 +749,10 @@ export async function gateDocsChangesForTask(args: {
 
 export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const startTime = new Date().toISOString()
-  const logDir = path.join(os.tmpdir(), `evalbuff-run-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
+  const baseDir = opts.outputDir ?? path.join(opts.repoPath, '.evalbuff')
+  const logDir = path.join(baseDir, `run-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
   fs.mkdirSync(logDir, { recursive: true })
+  ensureGitignore(opts.repoPath, '.evalbuff')
 
   let totalCost = 0
   let scoreProgression: number[] = []
@@ -1006,6 +1023,7 @@ if (import.meta.main) {
   const codingModel = getArg('coding-model', 'sonnet')
   const docsModel = getArg('docs-model', 'opus')
   const cachedFeatures = hasArg('cached-features') ? getArg('cached-features') : undefined
+  const outputDir = hasArg('output-dir') ? getArg('output-dir') : undefined
 
   runEvalbuff({
     repoPath,
@@ -1014,6 +1032,7 @@ if (import.meta.main) {
     codingModel,
     docsModel,
     cachedFeatures,
+    outputDir,
   }).catch((error) => {
     console.error('Evalbuff run failed:', error)
     process.exit(1)

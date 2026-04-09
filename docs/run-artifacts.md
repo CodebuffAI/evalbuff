@@ -1,9 +1,9 @@
 # Run Artifacts
 
-Every evalbuff run writes artifacts to a timestamped directory under `os.tmpdir()`:
+Every evalbuff run writes artifacts to a timestamped directory under `<repoPath>/.evalbuff/` by default (overridable with `--output-dir`):
 
 ```
-$TMPDIR/evalbuff-run-YYYY-MM-DDTHH-MM-SS/
+<repoPath>/.evalbuff/run-YYYY-MM-DDTHH-MM-SS/
 ├── plan.json                          # CarvePlan (only if features were freshly planned)
 ├── features.json                      # CarvedFeature[] — the selected features
 ├── events.jsonl                       # Timestamped event stream for TUI replay
@@ -128,7 +128,9 @@ Cumulative metrics like `totalCost` from `round_complete` events are **run total
 
 ## Run Directory Naming
 
-Valid run directories match `evalbuff-run-YYYY-MM-DDTHH-MM-SS`. Scratch directories like `evalbuff-run-review-*` or `evalbuff-run-<random>` are not real runs and must not be treated as such by discovery logic.
+Valid run directories match `run-YYYY-MM-DDTHH-MM-SS` (under `.evalbuff/`) or the legacy `evalbuff-run-YYYY-MM-DDTHH-MM-SS` (under temp). Scratch directories like `evalbuff-run-review-*` or `evalbuff-run-<random>` are not real runs and must not be treated as such by discovery logic.
+
+The `.evalbuff/` directory is automatically added to the repo's `.gitignore` on first run.
 
 ## report.md Contract
 

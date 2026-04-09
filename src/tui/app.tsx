@@ -746,7 +746,7 @@ function SummaryView({ state, logData, onBack }: {
 // Run Picker View
 // ============================================================
 
-/** Scan for evalbuff run directories across temp locations */
+/** Scan for evalbuff run directories across temp and .evalbuff locations */
 function scanRunDirs(): RunInfo[] {
   const os = require('os')
   const fs = require('fs')
@@ -754,7 +754,7 @@ function scanRunDirs(): RunInfo[] {
   const tmpDir = os.tmpdir()
   const dirs: string[] = []
 
-  // Scan both os.tmpdir() and /tmp (they can differ on macOS)
+  // Scan legacy temp locations (os.tmpdir() and /tmp on macOS)
   for (const base of [tmpDir, '/tmp']) {
     try {
       for (const name of fs.readdirSync(base)) {
@@ -767,6 +767,19 @@ function scanRunDirs(): RunInfo[] {
       }
     } catch {}
   }
+
+  // Scan .evalbuff/ in the current working directory
+  const evalbuffDir = path.join(process.cwd(), '.evalbuff')
+  try {
+    for (const name of fs.readdirSync(evalbuffDir)) {
+      if (name.startsWith('run-') || name.startsWith('perfect-')) {
+        const full = path.join(evalbuffDir, name)
+        try {
+          if (fs.statSync(full).isDirectory()) dirs.push(full)
+        } catch {}
+      }
+    }
+  } catch {}
 
   // Deduplicate and sort newest first
   const unique = [...new Set(dirs)].sort().reverse()

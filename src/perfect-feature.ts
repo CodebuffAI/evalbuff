@@ -58,6 +58,7 @@ interface PerfectFeatureOptions {
   analyzerModel: string
   docsModel: string
   initCommand?: string
+  outputDir?: string
 }
 
 interface RoundOutcome {
@@ -550,7 +551,8 @@ async function runRebuildAndJudge(opts: {
 
 async function perfectFeature(opts: PerfectFeatureOptions): Promise<void> {
   const startTime = new Date().toISOString()
-  const logDir = path.join(os.tmpdir(), `evalbuff-perfect-${opts.featureId}-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
+  const baseDir = opts.outputDir ?? path.join(opts.repoPath, '.evalbuff')
+  const logDir = path.join(baseDir, `perfect-${opts.featureId}-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`)
   fs.mkdirSync(logDir, { recursive: true })
 
   console.log(`\nPerfect Feature`)
@@ -815,6 +817,7 @@ if (import.meta.main) {
   const analyzerModel = getArg('analyzer-model', 'opus')
   const docsModel = getArg('docs-model', 'opus')
   const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
+  const outputDir = hasArg('output-dir') ? getArg('output-dir') : undefined
 
   perfectFeature({
     repoPath,
@@ -826,6 +829,7 @@ if (import.meta.main) {
     analyzerModel,
     docsModel,
     initCommand,
+    outputDir,
   }).catch((error) => {
     console.error('Perfect feature run failed:', error)
     process.exit(1)

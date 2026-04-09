@@ -203,20 +203,20 @@ async function replayLogDir(logDir: string) {
 // --- Find recent log dirs ---
 
 function findRecentLogDirs(): string[] {
-  const tmpDir = require('os').tmpdir()
+  const dirs: string[] = []
+
+  // New default: scan .evalbuff/ in current working directory
+  const evalbuffDir = path.join(process.cwd(), '.evalbuff')
   try {
-    return fs.readdirSync(tmpDir)
-      .filter(name => name.startsWith('evalbuff-run-'))
-      .map(name => path.join(tmpDir, name))
-      .filter(p => {
-        try { return fs.statSync(p).isDirectory() } catch { return false }
-      })
-      .sort()
-      .reverse()
-      .slice(0, 10)
-  } catch {
-    return []
-  }
+    for (const name of fs.readdirSync(evalbuffDir)) {
+      if (name.startsWith('run-') || name.startsWith('perfect-')) {
+        const full = path.join(evalbuffDir, name)
+        try { if (fs.statSync(full).isDirectory()) dirs.push(full) } catch {}
+      }
+    }
+  } catch {}
+
+  return [...new Set(dirs)].sort().reverse().slice(0, 10)
 }
 
 // --- Demo mode ---
@@ -347,8 +347,9 @@ async function main() {
     const codingModel = getArg('coding-model', 'sonnet')
     const docsModel = getArg('docs-model', 'opus')
     const cachedFeatures = hasArg('cached-features') ? getArg('cached-features') : undefined
+    const outputDir = hasArg('output-dir') ? getArg('output-dir') : undefined
 
-    runEvalbuff({ repoPath, n, initCommand, codingModel, docsModel, cachedFeatures }).catch(err => {
+    runEvalbuff({ repoPath, n, initCommand, codingModel, docsModel, cachedFeatures, outputDir }).catch(err => {
       events.log(`Run failed: ${err}`, 'error')
     })
   } else {
