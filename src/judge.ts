@@ -239,7 +239,7 @@ async function runCodexReviewer(
     model: 'gpt-5.4',
     workingDirectory: cwd,
     approvalPolicy: 'never',
-    sandboxMode: 'workspace-write',
+    sandboxMode: 'danger-full-access',
     webSearchMode: 'live',
     modelReasoningEffort: 'high',
   })

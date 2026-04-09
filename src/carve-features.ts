@@ -52,11 +52,36 @@ export interface CarveResult {
   repoPath: string
   generationDate: string
   features: CarvedFeature[]
+  failures: { id: string; error: string }[]
 }
 
-// --- Constants ---
+// --- Structured output schema for planFeatures ---
 
-const RESULT_FILE = 'evalbuff-carve-result.json'
+const carvePlanSchema = {
+  type: 'object',
+  properties: {
+    reasoning: { type: 'string', description: 'Analysis of the codebase and approach to selecting features' },
+    candidates: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Short kebab-case identifier' },
+          name: { type: 'string', description: 'Human readable name' },
+          prompt: { type: 'string', description: 'Natural prompt a developer would use to ask for this feature' },
+          description: { type: 'string', description: 'What this feature does and why it exists' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Files that ARE the feature (to delete or modify)' },
+          relevantFiles: { type: 'array', items: { type: 'string' }, description: 'Other files that import or reference the feature' },
+          complexity: { type: 'string', enum: ['small', 'medium', 'large'] },
+        },
+        required: ['id', 'name', 'prompt', 'description', 'files', 'relevantFiles', 'complexity'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['reasoning', 'candidates'],
+  additionalProperties: false,
+} as const
 
 // --- Phase 1: Identify features to carve (Codex agent) ---
 
@@ -69,6 +94,7 @@ export async function planFeatures(repoPath: string): Promise<CarvePlan> {
     model: 'gpt-5.4',
     workingDirectory: repoPath,
     approvalPolicy: 'never',
+    sandboxMode: 'danger-full-access',
     webSearchMode: 'live',
     modelReasoningEffort: 'high',
   })
@@ -103,53 +129,28 @@ Each feature should:
 
 ## Output
 
-After your analysis, write a file called \`${RESULT_FILE}\` with this JSON structure:
-
-\`\`\`json
-{
-  "reasoning": "Your analysis of the codebase and approach to selecting features",
-  "candidates": [
-    {
-      "id": "short-kebab-id",
-      "name": "Human readable name",
-      "prompt": "Natural prompt a developer would use to ask for this feature, 1-2 sentences",
-      "description": "What this feature does and why it exists",
-      "files": ["path/to/file1.ts", "path/to/file2.tsx"],
-      "relevantFiles": ["path/to/importer.ts"],
-      "complexity": "small|medium|large"
-    }
-  ]
-}
-\`\`\`
-
 - **files**: The files that ARE the feature (to be deleted or modified to remove it). Be thorough — missing a file means the carve won't be clean.
-- **relevantFiles**: Other files that import or reference the feature.
+- **relevantFiles**: Other files that import or reference the feature.`
 
-You MUST write the result file as your last action.`
+  const result = await thread.run(prompt, { outputSchema: carvePlanSchema })
 
-  const result = await thread.run(prompt)
-  console.log(`planFeatures: Codex finished. Response length: ${result.finalResponse.length}`)
-
-  // Read the result file
-  const resultPath = path.join(repoPath, RESULT_FILE)
-  if (!fs.existsSync(resultPath)) {
-    // Try to extract from the agent's final response
-    const jsonMatch = result.finalResponse.match(/\{[\s\S]*"candidates"[\s\S]*\}/)
-    if (jsonMatch) {
-      console.log('planFeatures: extracted plan from final response (no result file written)')
-      return JSON.parse(jsonMatch[0]) as CarvePlan
-    }
+  // With structured output, finalResponse is guaranteed valid JSON
+  let plan: CarvePlan
+  try {
+    plan = JSON.parse(result.finalResponse) as CarvePlan
+  } catch (error) {
     throw new Error(
-      `Codex agent did not produce a result file or extractable JSON. Final response: ${result.finalResponse?.slice(0, 500) || '(empty)'}`,
+      `Failed to parse structured output: ${error instanceof Error ? error.message : error}. Response: ${result.finalResponse?.slice(0, 500) || '(empty)'}`,
     )
   }
 
-  try {
-    const raw = fs.readFileSync(resultPath, 'utf-8')
-    return JSON.parse(raw) as CarvePlan
-  } finally {
-    fs.rmSync(resultPath, { force: true })
+  if (!plan.candidates?.length) {
+    throw new Error(
+      `Codex returned 0 candidates. Reasoning: ${plan.reasoning?.slice(0, 300) || '(none)'}`,
+    )
   }
+
+  return plan
 }
 
 // --- Phase 2: Carve a feature in an isolated worktree ---
@@ -192,6 +193,7 @@ export async function carveFeature(
       model: 'gpt-5.4',
       workingDirectory: worktreePath,
       approvalPolicy: 'never',
+      sandboxMode: 'danger-full-access',
       webSearchMode: 'live',
       modelReasoningEffort: 'high',
     })
@@ -224,7 +226,6 @@ export async function carveFeature(
 Do NOT create any result files — just make the edits directly.`
 
     await thread.run(prompt)
-    console.log(`  [carve:${candidate.id}] Codex finished`)
 
     // Capture the diff
     execSync('git add -A', { cwd: worktreePath, stdio: 'ignore' })
@@ -235,18 +236,11 @@ Do NOT create any result files — just make the edits directly.`
     })
 
     if (!diff.trim()) {
-      console.warn(
-        `  [carve:${candidate.id}] Empty diff — Codex made no changes. Skipping.`,
-      )
       return null
     }
 
     // Build operations from the actual git diff
     const operations = buildOperationsFromDiff(worktreePath, repoPath, candidate.files)
-
-    console.log(
-      `  [carve:${candidate.id}] Success: ${operations.length} file operations, ${diff.length} bytes diff`,
-    )
 
     return {
       id: candidate.id,
@@ -258,10 +252,6 @@ Do NOT create any result files — just make the edits directly.`
       diff,
     }
   } catch (error) {
-    console.error(
-      `  [carve:${candidate.id}] Failed:`,
-      error instanceof Error ? error.message : error,
-    )
     throw error
   } finally {
     // Clean up worktree and branch
@@ -323,11 +313,8 @@ export async function carveFeatures(
 ): Promise<CarveResult> {
   const { count = 10, outputPath } = options
 
-  console.log(`Carving features from: ${repoPath} (target: ${count})`)
-
   // Phase 1: Plan
   const plan = await planFeatures(repoPath)
-  console.log(`Found ${plan.candidates.length} candidates`)
 
   // Select top N candidates (prefer medium complexity)
   const ranked = [...plan.candidates].sort((a, b) => {
@@ -340,31 +327,23 @@ export async function carveFeatures(
   const features: CarvedFeature[] = []
   const failures: { id: string; error: string }[] = []
   for (const candidate of selected) {
-    console.log(
-      `\nCarving [${features.length + 1}/${selected.length}]: ${candidate.id} (${candidate.complexity})`,
-    )
     try {
       const carved = await carveFeature(repoPath, candidate)
       if (carved) {
         features.push(carved)
+      } else {
+        failures.push({ id: candidate.id, error: 'empty diff' })
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       failures.push({ id: candidate.id, error: message })
     }
   }
-  console.log(`\nCarved ${features.length}/${selected.length} features`)
-  if (failures.length > 0) {
-    console.warn(`Failed carves (${failures.length}):`)
-    for (const f of failures) {
-      console.warn(`  - ${f.id}: ${f.error}`)
-    }
-  }
-
   const result: CarveResult = {
     repoPath,
     generationDate: new Date().toISOString(),
     features,
+    failures,
   }
 
   // Save output
@@ -372,7 +351,6 @@ export async function carveFeatures(
     outputPath ||
     path.join(repoPath, `carve-${new Date().toISOString().slice(0, 10)}.json`)
   fs.writeFileSync(outPath, JSON.stringify(result, null, 2))
-  console.log(`\nSaved ${features.length} carved features to: ${outPath}`)
 
   return result
 }
@@ -396,6 +374,9 @@ if (import.meta.main) {
   carveFeatures(repoPath, { count, outputPath })
     .then((result) => {
       console.log(`\nDone! Carved ${result.features.length} features.`)
+      for (const f of result.failures) {
+        console.error(`  Failed: ${f.id} — ${f.error}`)
+      }
     })
     .catch((error) => {
       console.error('Carving failed:', error)
