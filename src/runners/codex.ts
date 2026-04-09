@@ -46,7 +46,18 @@ export class CodexRunner implements Runner {
           usage = event.usage
           break
         case 'turn.failed':
+          console.error(`[codex-runner] Turn failed:`, event.error.message)
+          steps.push({
+            type: 'text',
+            text: `[ERROR] Codex turn failed: ${event.error.message}`,
+          })
+          break
         case 'error':
+          console.error(`[codex-runner] Stream error:`, event.message)
+          steps.push({
+            type: 'text',
+            text: `[ERROR] Codex stream error: ${event.message}`,
+          })
           break
       }
     }
@@ -55,8 +66,11 @@ export class CodexRunner implements Runner {
     let diff = ''
     try {
       diff = captureGitDiff(this.cwd, { baseRef: baseSha })
-    } catch {
-      // Ignore git errors
+    } catch (error) {
+      console.error(
+        `[codex-runner] Failed to capture git diff:`,
+        error instanceof Error ? error.message : error,
+      )
     }
 
     // Estimate cost from token usage (rough GPT-5.1-codex pricing)
@@ -132,6 +146,11 @@ function processItem(item: ThreadItem, steps: AgentStep[]): void {
       // Skip todo lists
       break
     case 'error':
+      console.error(`[codex-runner] Item error:`, item)
+      steps.push({
+        type: 'text',
+        text: `[ERROR] Codex item error: ${'message' in item ? (item as any).message : JSON.stringify(item)}`,
+      })
       break
   }
 }

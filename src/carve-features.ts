@@ -128,6 +128,7 @@ After your analysis, write a file called \`${RESULT_FILE}\` with this JSON struc
 You MUST write the result file as your last action.`
 
   const result = await thread.run(prompt)
+  console.log(`planFeatures: Codex finished. Response length: ${result.finalResponse.length}`)
 
   // Read the result file
   const resultPath = path.join(repoPath, RESULT_FILE)
@@ -135,9 +136,12 @@ You MUST write the result file as your last action.`
     // Try to extract from the agent's final response
     const jsonMatch = result.finalResponse.match(/\{[\s\S]*"candidates"[\s\S]*\}/)
     if (jsonMatch) {
+      console.log('planFeatures: extracted plan from final response (no result file written)')
       return JSON.parse(jsonMatch[0]) as CarvePlan
     }
-    throw new Error('Codex agent did not produce a result file')
+    throw new Error(
+      `Codex agent did not produce a result file or extractable JSON. Final response: ${result.finalResponse?.slice(0, 500) || '(empty)'}`,
+    )
   }
 
   try {
@@ -168,10 +172,16 @@ export async function carveFeature(
   const branchName = `evalbuff-carve-${candidate.id}-${Date.now()}`
 
   try {
-    execSync(`git worktree add -b "${branchName}" "${worktreePath}" HEAD`, {
-      cwd: repoPath,
-      stdio: 'ignore',
-    })
+    try {
+      execSync(`git worktree add -b "${branchName}" "${worktreePath}" HEAD`, {
+        cwd: repoPath,
+        stdio: 'pipe',
+      })
+    } catch (error) {
+      throw new Error(
+        `Failed to create worktree for ${candidate.id}: ${error instanceof Error ? error.message : error}`,
+      )
+    }
 
     // Run the Codex agent in the worktree to carve the feature
     const codex = new Codex({
@@ -214,6 +224,7 @@ export async function carveFeature(
 Do NOT create any result files — just make the edits directly.`
 
     await thread.run(prompt)
+    console.log(`  [carve:${candidate.id}] Codex finished`)
 
     // Capture the diff
     execSync('git add -A', { cwd: worktreePath, stdio: 'ignore' })
@@ -224,11 +235,18 @@ Do NOT create any result files — just make the edits directly.`
     })
 
     if (!diff.trim()) {
+      console.warn(
+        `  [carve:${candidate.id}] Empty diff — Codex made no changes. Skipping.`,
+      )
       return null
     }
 
     // Build operations from the actual git diff
     const operations = buildOperationsFromDiff(worktreePath, repoPath, candidate.files)
+
+    console.log(
+      `  [carve:${candidate.id}] Success: ${operations.length} file operations, ${diff.length} bytes diff`,
+    )
 
     return {
       id: candidate.id,
@@ -239,8 +257,12 @@ Do NOT create any result files — just make the edits directly.`
       operations,
       diff,
     }
-  } catch {
-    return null
+  } catch (error) {
+    console.error(
+      `  [carve:${candidate.id}] Failed:`,
+      error instanceof Error ? error.message : error,
+    )
+    throw error
   } finally {
     // Clean up worktree and branch
     try {
@@ -316,13 +338,28 @@ export async function carveFeatures(
 
   // Phase 2: Carve each feature
   const features: CarvedFeature[] = []
+  const failures: { id: string; error: string }[] = []
   for (const candidate of selected) {
-    const carved = await carveFeature(repoPath, candidate)
-    if (carved) {
-      features.push(carved)
+    console.log(
+      `\nCarving [${features.length + 1}/${selected.length}]: ${candidate.id} (${candidate.complexity})`,
+    )
+    try {
+      const carved = await carveFeature(repoPath, candidate)
+      if (carved) {
+        features.push(carved)
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      failures.push({ id: candidate.id, error: message })
     }
   }
-  console.log(`Carved ${features.length}/${selected.length} features`)
+  console.log(`\nCarved ${features.length}/${selected.length} features`)
+  if (failures.length > 0) {
+    console.warn(`Failed carves (${failures.length}):`)
+    for (const f of failures) {
+      console.warn(`  - ${f.id}: ${f.error}`)
+    }
+  }
 
   const result: CarveResult = {
     repoPath,
