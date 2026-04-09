@@ -44,7 +44,6 @@ interface RunState {
   elapsed: string
   done: boolean
   n: number
-  loops: number
   codingModel: string
   docsModel: string
 }
@@ -76,7 +75,7 @@ function initialState(): RunState {
     phaseDetail: 'Initializing...', features: new Map(), featureOrder: [],
     roundScores: new Map(), totalCost: 0, scoreProgression: [],
     logs: [], startTime: Date.now(), elapsed: '00:00', done: false,
-    n: 0, loops: 0, codingModel: '', docsModel: '',
+    n: 0, codingModel: '', docsModel: '',
   }
 }
 
@@ -106,20 +105,19 @@ function phaseLabel(phase: Phase, round: number, loop: number): string {
     case 'planning': return 'Planning Features'
     case 'carving': return 'Carving Features'
     case 'evaluating':
-      return round === 0 ? 'Baseline Eval (Round 0)' : `Re-eval (Loop ${loop}, Round ${round})`
-    case 'docs_writer': return `Docs Writer (Loop ${loop})`
+      return round === 0 ? 'Baseline Eval (Round 0)' : `Improvement Eval (Round ${round})`
+    case 'docs_writer': return `Docs Writer (Round ${loop})`
     case 'complete': return 'Complete'
   }
 }
 
-function phaseProgress(phase: Phase, round: number, loops: number): number {
+function phaseProgress(phase: Phase, round: number): number {
   if (phase === 'planning') return 0.05
   if (phase === 'carving') return 0.10
   if (phase === 'complete') return 1.0
   if (round === 0) return 0.25
-  const loopWeight = 0.65 / (loops || 1)
-  const loopProgress = (round - 1) * loopWeight + (phase === 'docs_writer' ? 0 : loopWeight * 0.5)
-  return 0.35 + loopProgress
+  if (phase === 'docs_writer') return 0.55
+  return 0.80
 }
 
 function scoreColor(score: number): string {
@@ -178,7 +176,7 @@ function DashboardView({ state, cursor, onSelect }: {
   onSelect: (id: string) => void
 }) {
   const pLabel = phaseLabel(state.phase, state.round, state.loop)
-  const pct = Math.round(phaseProgress(state.phase, state.round, state.loops || 1) * 100)
+  const pct = Math.round(phaseProgress(state.phase, state.round) * 100)
   const repoName = state.repoPath.split('/').pop() || state.repoPath
 
   return (
@@ -189,7 +187,7 @@ function DashboardView({ state, cursor, onSelect }: {
           <text>
             <span fg="#89b4fa" attributes={1}>EVALBUFF</span>
             <span fg="#6c7086">{' '}{repoName}</span>
-            <span fg="#585b70">{' '}n={state.n} loops={state.loops} {state.codingModel}/{state.docsModel}</span>
+            <span fg="#585b70">{' '}n={state.n} {state.codingModel}/{state.docsModel}</span>
           </text>
           <text fg="#a6adc8">{state.elapsed}</text>
         </box>
@@ -528,7 +526,7 @@ function RoundDetailView({ round, state, logData, cursor, onBack }: {
           <text>
             <span fg="#585b70">{'< '}</span>
             <span fg="#89b4fa" attributes={1}>Round {round}</span>
-            <span fg="#6c7086">{round === 0 ? ' (Baseline)' : ` (Loop ${round})`}</span>
+            <span fg="#6c7086">{round === 0 ? ' (Baseline)' : ' (Improvement)'}</span>
           </text>
           <text>
             <span fg="#6c7086">Avg: </span>
@@ -598,7 +596,7 @@ function RoundDetailView({ round, state, logData, cursor, onBack }: {
               <text fg="#6c7086">Baseline round — no docs changes applied.</text>
               <text fg="#6c7086" wrapMode="word">
                 This is the first evaluation round. Agents are tested against the current docs.
-                After this round, judge suggestions will be collected and docs will be updated.
+                After this round, evalbuff runs one gated improvement round with updated docs.
               </text>
             </box>
           )}
@@ -668,7 +666,7 @@ function SummaryView({ state, logData, onBack }: {
             <text fg="#6c7086">--- Config ---</text>
             <text fg="#cdd6f4">Repo: {state.repoPath}</text>
             <text fg="#cdd6f4">Features: {state.featureOrder.length}</text>
-            <text fg="#cdd6f4">Loops: {state.loops}</text>
+            <text fg="#cdd6f4">Rounds: {state.scoreProgression.length}</text>
             <text fg="#cdd6f4">Coding: {state.codingModel}</text>
             <text fg="#cdd6f4">Docs: {state.docsModel}</text>
             <text fg="#cdd6f4">Total cost: ${state.totalCost.toFixed(2)}</text>
@@ -985,7 +983,6 @@ export function App({ startView, onLoadRun }: { startView?: View['type']; onLoad
             next.repoPath = event.repoPath
             next.logDir = event.logDir
             next.n = event.n
-            next.loops = event.loops
             next.codingModel = event.codingModel
             next.docsModel = event.docsModel
             next.startTime = Date.now()

@@ -118,7 +118,7 @@ Valid run directories match `evalbuff-run-YYYY-MM-DDTHH-MM-SS`. Scratch director
 
 `saveSummary()` in `src/report.ts` writes **both** `summary.json` and `report.md`. Both must be generated together.
 
-The report overview must include: repo path, start time, end time, duration, features carved, improvement loop count, coding model, docs model, and total cost. The "Scores by Round" table must include one column per round plus Average and Cost rows.
+The report overview must include: repo path, start time, end time, duration, features carved, improvement round count, coding model, docs model, and total cost. The "Scores by Round" table must include one column per round plus Average and Cost rows.
 
 When baseline rejudging is enabled, include both the baseline rejudge trajectory and explicit derived metrics:
 - **Judge recalibration** = `baselineRejudgeProgression[last] - scoreProgression[0]` — measures how much the judge's scoring changed due to updated docs alone.

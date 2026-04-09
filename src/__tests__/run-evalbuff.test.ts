@@ -101,8 +101,6 @@ describe('evaluateDocChangeGate', () => {
       {
         repoPath: '/tmp/repo',
         n: 1,
-        parallelism: 1,
-        loops: 1,
         codingModel: 'sonnet',
         docsModel: 'opus',
       },
@@ -136,8 +134,6 @@ describe('evaluateDocChangeGate', () => {
         opts: {
           repoPath: '/tmp/repo',
           n: 1,
-          parallelism: 1,
-          loops: 1,
           codingModel: 'sonnet',
           docsModel: 'opus',
         },

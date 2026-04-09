@@ -3,7 +3,7 @@
  * Evalbuff CLI entry point.
  *
  * Usage:
- *   evalbuff --repo /path/to/repo [--n 20] [--parallelism 1] [--loops 1]
+ *   evalbuff --repo /path/to/repo [--n 20]
  *            [--init-command "npm install"] [--coding-model sonnet] [--docs-model opus]
  *            [--cached-features /path/to/features.json]
  */
@@ -27,8 +27,6 @@ if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
 Options:
   --repo <path>              Path to the target repository (required)
   --n <number>               Number of features to evaluate (default: 20)
-  --parallelism <number>     Max concurrent carve/setup jobs (default: 1)
-  --loops <number>           Number of optimization loops (default: 1)
   --init-command <command>   Command to run before each agent run
   --coding-model <model>     Model for coding agent (default: sonnet)
   --docs-model <model>       Model for docs agent (default: opus)
@@ -48,8 +46,6 @@ const hasArg = (name: string): boolean => args.includes(`--${name}`)
 
 const repoPath = getArg('repo')
 const n = parseInt(getArg('n', '20'))
-const parallelism = parseInt(getArg('parallelism', '1'))
-const loops = parseInt(getArg('loops', '1'))
 const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
 const codingModel = getArg('coding-model', 'sonnet')
 const docsModel = getArg('docs-model', 'opus')
@@ -58,8 +54,6 @@ const cachedFeatures = hasArg('cached-features') ? getArg('cached-features') : u
 runEvalbuff({
   repoPath,
   n,
-  parallelism,
-  loops,
   initCommand,
   codingModel,
   docsModel,

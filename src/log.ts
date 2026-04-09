@@ -67,14 +67,13 @@ function scoreDelta(before: number, after: number): string {
 export function printHeader(opts: {
   repoPath: string
   n: number
-  loops: number
   codingModel: string
   docsModel: string
   logDir: string
 }): void {
   console.log(`\n\x1b[1mEvalbuff Run\x1b[0m`)
   console.log(`  Repo: ${opts.repoPath}`)
-  console.log(`  Features: ${opts.n} | Loops: ${opts.loops} | Models: ${opts.codingModel}/${opts.docsModel}`)
+  console.log(`  Features: ${opts.n} | Models: ${opts.codingModel}/${opts.docsModel}`)
   console.log(`  Logs: ${opts.logDir}`)
 }
 

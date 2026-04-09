@@ -5,13 +5,13 @@
  *   1. Plan features to carve (GPT-5.4 via Codex SDK)
  *   2. Carve a random subset of n features
  *   3. Baseline: rebuild each feature sequentially (Claude Code), judge (Codex), get scores + suggestions
- *   4. Loop N times:
+ *   4. Improvement round:
  *      a. Re-evaluate each feature sequentially
  *      b. Draft each suggested docs change independently
  *      c. Gate each docs change on the feature that inspired it before accepting it
  *
  * Usage:
- *   bun run src/run-evalbuff.ts --repo /path/to/repo [--n 5] [--parallelism 1] [--loops 1] [--init-command "npm install"]
+ *   bun run src/run-evalbuff.ts --repo /path/to/repo [--n 5] [--init-command "npm install"]
  */
 import fs from 'fs'
 import os from 'os'
@@ -55,8 +55,6 @@ import type {
 export interface EvalbuffOptions {
   repoPath: string
   n: number            // number of features to randomly select
-  parallelism: number  // retained for carving/setup concurrency; eval loops run sequentially
-  loops: number        // number of improvement loops (default 1)
   initCommand?: string
   codingModel: string  // model for coding agents (default: sonnet)
   docsModel: string    // model for docs agents (default: opus)
@@ -65,6 +63,7 @@ export interface EvalbuffOptions {
 
 const DOC_CHANGE_ACCEPTANCE_THRESHOLD = 0.5
 const DOC_CHANGE_FAST_ACCEPT_THRESHOLD = DOC_CHANGE_ACCEPTANCE_THRESHOLD * 2
+const CARVE_PARALLELISM = 10
 
 export function evaluateDocChangeGate(args: {
   baseScore: number
@@ -230,8 +229,8 @@ export async function runEvalRound(
 //
 // Re-runs the judge on the baseline's stored diffs/traces after docs have been
 // updated. The agent's work is fixed — only the docs given to the judge change.
-// This lets us see whether score changes over loops reflect real agent
-// improvement or merely judge recalibration from better docs.
+// This lets us see whether the improvement round changed real agent behavior
+// or merely judge calibration from better docs.
 
 async function runBaselineRejudgeRound(
   baseline: RoundResult,
@@ -242,66 +241,57 @@ async function runBaselineRejudgeRound(
 ): Promise<RoundResult> {
   let completed = 0
   startSpinner(`Baseline rejudge: 0/${baseline.tasks.length} re-scored...`)
-
   const featureById = new Map(features.map(f => [f.id, f]))
   const results: TaskResult[] = []
-  const queue = baseline.tasks.map((baselineTask, i) => ({ baselineTask, i }))
-  let next = 0
+  for (let i = 0; i < baseline.tasks.length; i++) {
+    const baselineTask = baseline.tasks[i]
+    const feature = featureById.get(baselineTask.featureId)
 
-  async function worker(): Promise<void> {
-    while (next < queue.length) {
-      const { baselineTask, i } = queue[next++]
-      const feature = featureById.get(baselineTask.featureId)
-
-      if (!feature || baselineTask.score < 0) {
-        results[i] = baselineTask
-        completed++
-        updateSpinner(`Baseline rejudge: ${completed}/${queue.length} re-scored`)
-        continue
-      }
-
-      try {
-        const judging = await rejudgeBaselineWithCurrentDocs({
-          idx: i,
-          total: queue.length,
-          repoPath: opts.repoPath,
-          feature,
-          baselineDiff: baselineTask.diff,
-          groundTruthDiff: groundTruthDiffs.get(feature.id) || '',
-          initCommand: opts.initCommand,
-          docsSourcePath: opts.repoPath,
-        })
-        results[i] = {
-          ...baselineTask,
-          score: judging.overallScore,
-          judging,
-          costEstimate: 0,
-        }
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error)
-        results[i] = {
-          ...baselineTask,
-          score: -1,
-          judging: {
-            analysis: `Rejudge failed: ${msg.slice(0, 500)}`,
-            strengths: [],
-            weaknesses: ['Rejudge failed'],
-            e2eTestsPerformed: [],
-            completionScore: -1,
-            codeQualityScore: -1,
-            e2eScore: -1,
-            overallScore: -1,
-          },
-        }
-      }
+    if (!feature || baselineTask.score < 0) {
+      results[i] = baselineTask
       completed++
-      updateSpinner(`Baseline rejudge: ${completed}/${queue.length} re-scored`)
+      updateSpinner(`Baseline rejudge: ${completed}/${baseline.tasks.length} re-scored`)
+      continue
     }
-  }
 
-  await Promise.all(
-    Array.from({ length: Math.min(opts.parallelism, queue.length) }, () => worker()),
-  )
+    try {
+      const judging = await rejudgeBaselineWithCurrentDocs({
+        idx: i,
+        total: baseline.tasks.length,
+        repoPath: opts.repoPath,
+        feature,
+        baselineDiff: baselineTask.diff,
+        groundTruthDiff: groundTruthDiffs.get(feature.id) || '',
+        initCommand: opts.initCommand,
+        docsSourcePath: opts.repoPath,
+      })
+      results[i] = {
+        ...baselineTask,
+        score: judging.overallScore,
+        judging,
+        costEstimate: 0,
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      results[i] = {
+        ...baselineTask,
+        score: -1,
+        judging: {
+          analysis: `Rejudge failed: ${msg.slice(0, 500)}`,
+          strengths: [],
+          weaknesses: ['Rejudge failed'],
+          e2eTestsPerformed: [],
+          completionScore: -1,
+          codeQualityScore: -1,
+          e2eScore: -1,
+          overallScore: -1,
+        },
+      }
+    }
+
+    completed++
+    updateSpinner(`Baseline rejudge: ${completed}/${baseline.tasks.length} re-scored`)
+  }
 
   stopSpinner()
 
@@ -704,8 +694,6 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     type: 'run_start',
     repoPath: opts.repoPath,
     n: opts.n,
-    loops: opts.loops,
-    parallelism: opts.parallelism,
     codingModel: opts.codingModel,
     docsModel: opts.docsModel,
     logDir,
@@ -714,7 +702,6 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   printHeader({
     repoPath: opts.repoPath,
     n: opts.n,
-    loops: opts.loops,
     codingModel: opts.codingModel,
     docsModel: opts.docsModel,
     logDir,
@@ -747,10 +734,10 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     {
       const carveQueue = [...selected]
       let carveNext = 0
-      let carveCompleted = 0
       const carveResults: (CarvedFeature | null)[] = new Array(carveQueue.length).fill(null)
 
       startSpinner(`Carving 0/${carveQueue.length} features...`)
+      let carveCompleted = 0
 
       async function carveWorker(): Promise<void> {
         while (carveNext < carveQueue.length) {
@@ -773,7 +760,7 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
       }
 
       await Promise.all(
-        Array.from({ length: Math.min(opts.parallelism, carveQueue.length) }, () => carveWorker()),
+        Array.from({ length: Math.min(CARVE_PARALLELISM, carveQueue.length) }, () => carveWorker()),
       )
       for (const result of carveResults) {
         if (result) features.push(result)
@@ -811,64 +798,61 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
   const baselineProjectSuggestions = collectProjectSuggestions(baseline.tasks.filter(t => t.score >= 0))
   if (baselineProjectSuggestions) allProjectSuggestionSections.push(`## Baseline Round\n\n${baselineProjectSuggestions}`)
 
-  // --- Improvement loops ---
-  for (let loop = 1; loop <= opts.loops; loop++) {
-    console.log(`\n\x1b[1mLoop ${loop}/${opts.loops}\x1b[0m`)
+  // --- Improvement round ---
+  const improvementRound = 1
+  console.log(`\n\x1b[1mImprovement Round\x1b[0m`)
 
-    const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
-    events.send({ type: 'phase_change', phase: 'evaluating', round: loop, loop, detail: 'Re-eval with updated docs' })
-    const featureGateResults: FeatureDocGateResult[] = []
-    const results = await runEvalRound(
-      features,
-      groundTruthDiffs,
-      opts,
-      loop,
-      baseline.avgScore,
-      async ({ feature, task }) => {
-        const gated = await gateDocsChangesForTask({
-          feature,
-          task,
-          opts,
-          groundTruthDiffs,
-          loop,
-        })
-        featureGateResults.push(gated.result)
-        return gated.validationCost
-      },
-    )
+  const docsSnapshotBefore = getDocsSnapshot(opts.repoPath)
+  events.send({ type: 'phase_change', phase: 'evaluating', round: improvementRound, loop: improvementRound, detail: 'Re-eval with updated docs' })
+  const featureGateResults: FeatureDocGateResult[] = []
+  const results = await runEvalRound(
+    features,
+    groundTruthDiffs,
+    opts,
+    improvementRound,
+    baseline.avgScore,
+    async ({ feature, task }) => {
+      const gated = await gateDocsChangesForTask({
+        feature,
+        task,
+        opts,
+        groundTruthDiffs,
+        loop: improvementRound,
+      })
+      featureGateResults.push(gated.result)
+      return gated.validationCost
+    },
+  )
 
-    totalCost += results.totalCost
-    roundResults.push(results)
+  totalCost += results.totalCost
+  roundResults.push(results)
 
-    const loopDocGateResult: LoopDocGateResult = {
-      loop,
-      threshold: DOC_CHANGE_ACCEPTANCE_THRESHOLD,
-      fastAcceptThreshold: DOC_CHANGE_FAST_ACCEPT_THRESHOLD,
-      features: featureGateResults,
-    }
-    loopDocGateResults.push(loopDocGateResult)
-
-    const docsAfterRefactor = getDocsSnapshot(opts.repoPath)
-    const docsDiffText = computeDocsDiffText(docsSnapshotBefore, docsAfterRefactor)
-    const loopSummaryText = renderLoopDocGateSummary(loopDocGateResult)
-    fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${loop}.txt`), loopSummaryText)
-    fs.writeFileSync(path.join(logDir, `docs-diff-loop-${loop}.txt`), docsDiffText)
-    fs.writeFileSync(
-      path.join(logDir, `docs-state-loop-${loop}.json`),
-      JSON.stringify(docsAfterRefactor, null, 2),
-    )
-    saveLoopDocGateResults(logDir, loopDocGateResult)
-    saveRoundResults(logDir, results)
-
-    // Re-judge baseline
-    const rejudged = await runBaselineRejudgeRound(baseline, features, groundTruthDiffs, opts, loop)
-    saveBaselineRejudgeResults(logDir, rejudged)
-    baselineRejudgeResults.push(rejudged)
-
-    // Collect project suggestions
-    const loopProjectSuggestions = collectProjectSuggestions(results.tasks.filter(t => t.score >= 0))
-    if (loopProjectSuggestions) allProjectSuggestionSections.push(`## Loop ${loop}\n\n${loopProjectSuggestions}`)
+  const loopDocGateResult: LoopDocGateResult = {
+    loop: improvementRound,
+    threshold: DOC_CHANGE_ACCEPTANCE_THRESHOLD,
+    fastAcceptThreshold: DOC_CHANGE_FAST_ACCEPT_THRESHOLD,
+    features: featureGateResults,
   }
+  loopDocGateResults.push(loopDocGateResult)
+
+  const docsAfterRefactor = getDocsSnapshot(opts.repoPath)
+  const docsDiffText = computeDocsDiffText(docsSnapshotBefore, docsAfterRefactor)
+  const loopSummaryText = renderLoopDocGateSummary(loopDocGateResult)
+  fs.writeFileSync(path.join(logDir, `judge-suggestions-loop-${improvementRound}.txt`), loopSummaryText)
+  fs.writeFileSync(path.join(logDir, `docs-diff-loop-${improvementRound}.txt`), docsDiffText)
+  fs.writeFileSync(
+    path.join(logDir, `docs-state-loop-${improvementRound}.json`),
+    JSON.stringify(docsAfterRefactor, null, 2),
+  )
+  saveLoopDocGateResults(logDir, loopDocGateResult)
+  saveRoundResults(logDir, results)
+
+  const rejudged = await runBaselineRejudgeRound(baseline, features, groundTruthDiffs, opts, improvementRound)
+  saveBaselineRejudgeResults(logDir, rejudged)
+  baselineRejudgeResults.push(rejudged)
+
+  const loopProjectSuggestions = collectProjectSuggestions(results.tasks.filter(t => t.score >= 0))
+  if (loopProjectSuggestions) allProjectSuggestionSections.push(`## Improvement Round\n\n${loopProjectSuggestions}`)
 
   // --- Generate project improvement prompts ---
   let projectPrompts: string[] = []
@@ -950,8 +934,6 @@ if (import.meta.main) {
 
   const repoPath = getArg('repo')
   const n = parseInt(getArg('n', '20'))
-  const parallelism = parseInt(getArg('parallelism', '1'))
-  const loops = parseInt(getArg('loops', '1'))
   const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
   const codingModel = getArg('coding-model', 'sonnet')
   const docsModel = getArg('docs-model', 'opus')
@@ -960,8 +942,6 @@ if (import.meta.main) {
   runEvalbuff({
     repoPath,
     n,
-    parallelism,
-    loops,
     initCommand,
     codingModel,
     docsModel,

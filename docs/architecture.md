@@ -2,13 +2,13 @@
 
 ## Pipeline Overview
 
-Evalbuff follows a plan → carve → baseline → gated-improvement loop:
+Evalbuff follows a plan → carve → baseline → gated improvement round:
 
 1. **Plan** — `planFeatures()` in `src/carve-features.ts` uses a Codex agent to scan the target repo and identify 15–25 discrete features that can be cleanly removed.
 2. **Carve** — `carveFeature()` creates an isolated git worktree, runs a Codex agent to remove the feature, and captures the resulting diff and file operations.
 3. **Baseline** — `runAgentOnCarve()` in `src/eval-runner.ts` clones the repo, applies the carve, copies current docs, runs a coding agent to rebuild the feature, then hands the result to `judgeTaskResult()` in `src/judge.ts`.
-4. **Gate docs changes** — during each improvement loop, every feature is re-run sequentially. The judge and coding agent both suggest independent docs changes. `planDocsChangesForTask()` in `src/docs-writer.ts` reads the docs once, rejects overfit/low-value suggestions, and creates one independent committed docs candidate per surviving suggestion. Evalbuff then materializes each candidate patch onto the current docs state, re-judges the originating task, and optionally re-runs the coding agent before accepting it.
-5. **Repeat** — Step 4 loops N times. Each completed loop also re-judges the baseline diffs with the final loop docs to separate judge recalibration from real agent improvement.
+4. **Gate docs changes** — during the improvement round, every feature is re-run sequentially. The judge and coding agent both suggest independent docs changes. `planDocsChangesForTask()` in `src/docs-writer.ts` reads the docs once, rejects overfit/low-value suggestions, and creates one independent committed docs candidate per surviving suggestion. Evalbuff then materializes each candidate patch onto the current docs state, re-judges the originating task, and optionally re-runs the coding agent before accepting it.
+5. **Baseline rejudge** — after the improvement round, Evalbuff re-judges the baseline diffs with the updated docs to separate judge recalibration from real agent improvement.
 
 ## Key Modules
 
@@ -40,7 +40,7 @@ Target repo
   ↓   runAgentOnCarve() → TaskResult (per feature, sequentially)
   ↓   saveRoundResults() → round-N/ directory
   ↓
-  ↓ For each improvement loop:
+  ↓ Improvement round:
   ↓   runEvalRound() → new scores
   ↓   gateDocsChangesForTask() → per-feature accepted/rejected doc candidates
   ↓   runBaselineRejudgeRound() → re-scored baseline
@@ -95,7 +95,7 @@ When modifying the orchestration (new `EvalbuffOptions` fields, new phases, new 
 
 ## Concurrency
 
-Carving still uses bounded concurrency (`opts.parallelism` workers pull from a shared queue), but eval rounds are intentionally sequential. That ordering matters because accepted docs changes from one feature should affect the very next feature in the same loop.
+Carving uses a fixed internal worker pool in `src/run-evalbuff.ts` to speed up feature extraction, while baseline evaluation, docs gating, and baseline rejudging stay sequential. The sequential improvement round still matters because accepted docs changes from one feature should affect the very next feature.
 
 ## Events and TUI
 

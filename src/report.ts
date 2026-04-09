@@ -75,7 +75,6 @@ export interface EvalSummary {
 }
 
 export interface EvalOptions {
-  loops: number
   codingModel: string
   docsModel: string
 }
@@ -194,7 +193,7 @@ export function saveSummary(
     `| **End** | ${summary.endTime} |`,
     `| **Duration** | ${formatDuration(summary.startTime, summary.endTime)} |`,
     `| **Features carved** | ${summary.featuresCarved} |`,
-    `| **Improvement loops** | ${opts.loops} |`,
+    `| **Improvement rounds** | ${Math.max(roundResults.length - 1, 0)} |`,
     `| **Coding model** | ${opts.codingModel} |`,
     `| **Docs model** | ${opts.docsModel} |`,
     `| **Doc gate threshold** | ${loopDocGateResults[0]?.threshold?.toFixed(1) ?? 'n/a'} |`,
@@ -449,7 +448,7 @@ export function saveSummary(
   }
 
   // --- Final docs state ---
-  const lastLoop = opts.loops
+  const lastLoop = Math.max(roundResults.length - 1, 0)
   const finalDocsFile = path.join(logDir, `docs-state-loop-${lastLoop}.json`)
   if (fs.existsSync(finalDocsFile)) {
     const finalDocs: Record<string, string> = JSON.parse(fs.readFileSync(finalDocsFile, 'utf-8'))

@@ -6,15 +6,13 @@
   bun run src/run-evalbuff.ts \
   --repo /path/to/repo \
   [--n 20] \
-  [--parallelism 1] \
-  [--loops 1] \
   [--init-command "npm install"] \
   [--coding-model sonnet] \
   [--docs-model opus] \
   [--cached-features /path/to/features.json]
 ```
 
-All flags are parsed explicitly in the `import.meta.main` block. Required flags must be validated with helpful errors. The `--cached-features` flag skips planning/carving and loads pre-carved features directly. Improvement loops now run features sequentially and gate docs changes one candidate at a time; `--parallelism` still applies to carving/setup concurrency, not the per-loop feature order.
+All flags are parsed explicitly in the `import.meta.main` block. Required flags must be validated with helpful errors. The `--cached-features` flag skips planning/carving and loads pre-carved features directly. Evalbuff now always runs a single sequential improvement round after baseline, and carve concurrency is an internal fixed constant rather than a public flag.
 
 ## Perfect Feature (Single-Feature Optimizer)
 
@@ -65,7 +63,7 @@ For any new CLI command:
 2. **Validate required flags** and print helpful error messages for missing ones. Exit early with usage text rather than failing deep in the pipeline.
 3. **Add a `scripts` entry** in `package.json`.
 4. **Keep the CLI contract consistent** between the file header usage comment, the flag parser, the options type, and the `package.json` script entry.
-5. **Log non-default options** in startup output when they affect behavior (e.g., model overrides, parallelism).
+5. **Log non-default options** in startup output when they affect behavior (e.g., model overrides).
 6. **Thread every flag** through the options type into the runtime path — never parse a flag and ignore it.
 
 ### New Command Checklist

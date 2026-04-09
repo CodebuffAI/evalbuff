@@ -303,12 +303,10 @@ describe('Evalbuff pipeline e2e', () => {
         fs.readdirSync(tmpDir).filter((entry) => entry.startsWith('evalbuff-run-')),
       )
 
-      // Use minimal settings: 2 features, 1 parallel run, 1 improvement loop
+      // Use minimal settings: 2 features and the default single improvement round
       await runEvalbuff({
         repoPath: repoDir,
         n: 2,
-        parallelism: 1,
-        loops: 1,
         codingModel: 'sonnet',
         docsModel: 'sonnet', // use sonnet for speed in tests
       })

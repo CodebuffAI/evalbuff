@@ -11,7 +11,7 @@ import { getErrorObject } from './vendor/error'
  *
  * When localRepoPath is provided, uses a local clone (near-instant via hardlinks)
  * instead of a remote clone (5-30s per clone). This is the single biggest
- * speedup in evalbuff — with parallelism=5, saves 10-30 remote clones per commit.
+ * speedup in evalbuff because the pipeline creates many short-lived clones.
  */
 export const withTestRepo = async <T>(
   repoConfig: {
