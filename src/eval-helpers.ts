@@ -187,6 +187,22 @@ export function syncDocsIntoRepo(
   const targetDocs = getDocsSnapshot(targetRepoPath)
   const changed = new Set<string>()
 
+  // Detect symlinks among root doc files so we can preserve them.
+  // When CLAUDE.md is a symlink to AGENTS.md, writing it as a regular file
+  // breaks the relationship — git patches that modify AGENTS.md won't
+  // propagate to CLAUDE.md, leaving it stale.
+  const docSymlinks = new Map<string, string>()
+  for (const file of ["AGENTS.md", "CLAUDE.md"]) {
+    const p = path.join(sourceRepoPath, file)
+    try {
+      if (fs.lstatSync(p).isSymbolicLink()) {
+        docSymlinks.set(file, fs.readlinkSync(p))
+      }
+    } catch {
+      // file doesn't exist
+    }
+  }
+
   for (const filePath of Object.keys(targetDocs)) {
     if (filePath in sourceDocs) continue
     fs.rmSync(path.join(targetRepoPath, filePath), { force: true })
@@ -195,11 +211,29 @@ export function syncDocsIntoRepo(
   }
 
   for (const [filePath, content] of Object.entries(sourceDocs)) {
+    if (docSymlinks.has(filePath)) continue
     if (targetDocs[filePath] === content) continue
     const absolutePath = path.join(targetRepoPath, filePath)
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true })
     fs.writeFileSync(absolutePath, content)
     changed.add(filePath)
+  }
+
+  // Recreate symlinks so git patches propagate correctly
+  for (const [file, linkTarget] of docSymlinks) {
+    const absolutePath = path.join(targetRepoPath, file)
+    let alreadyCorrect = false
+    try {
+      alreadyCorrect = fs.lstatSync(absolutePath).isSymbolicLink()
+        && fs.readlinkSync(absolutePath) === linkTarget
+    } catch {
+      // doesn't exist yet
+    }
+    if (!alreadyCorrect) {
+      fs.rmSync(absolutePath, { force: true })
+      fs.symlinkSync(linkTarget, absolutePath)
+      changed.add(file)
+    }
   }
 
   return [...changed].sort()
