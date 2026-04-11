@@ -391,6 +391,18 @@ describe('Evalbuff pipeline e2e', () => {
       expect(round1Summary.tasks).toBeArray()
       console.log(`Loop 1 round: avg score ${round1Summary.avgScore.toFixed(1)}, ${round1Summary.tasks.length} tasks`)
 
+      // --- Verify final verification round (round-2) ---
+      const round2Dir = path.join(logDir, 'round-2')
+      expect(fs.existsSync(round2Dir)).toBe(true)
+
+      const round2Summary = JSON.parse(
+        fs.readFileSync(path.join(round2Dir, 'summary.json'), 'utf-8'),
+      )
+      expect(round2Summary.round).toBe(2)
+      expect(round2Summary.tasks).toBeArray()
+      expect(round2Summary.tasks.length).toBe(round0Summary.tasks.length)
+      console.log(`Final round: avg score ${round2Summary.avgScore.toFixed(1)}, ${round2Summary.tasks.length} tasks`)
+
       // --- Verify docs writer artifacts ---
       const judgeSuggestionsPath = path.join(logDir, 'judge-suggestions-loop-1.txt')
       expect(fs.existsSync(judgeSuggestionsPath)).toBe(true)
@@ -414,9 +426,9 @@ describe('Evalbuff pipeline e2e', () => {
       expect(summary.repoPath).toBe(repoDir)
       expect(summary.featuresCarved).toBeGreaterThanOrEqual(1)
       expect(summary.rounds).toBeArray()
-      expect(summary.rounds.length).toBe(2) // baseline + 1 loop
+      expect(summary.rounds.length).toBe(3) // baseline + 1 loop + final
       expect(summary.scoreProgression).toBeArray()
-      expect(summary.scoreProgression.length).toBe(2)
+      expect(summary.scoreProgression.length).toBe(3)
       expect(summary.totalCost).toBeGreaterThanOrEqual(0)
       console.log(`Score progression: ${summary.scoreProgression.map((s: number) => s.toFixed(1)).join(' → ')}`)
       console.log(`Total cost: $${summary.totalCost.toFixed(2)}`)
@@ -429,6 +441,7 @@ describe('Evalbuff pipeline e2e', () => {
       expect(report).toContain('Score Trajectory')
       expect(report).toContain('Scores by Round')
       expect(report).toContain('Baseline')
+      expect(report).toContain('Final')
       console.log(`Report written: ${report.split('\n').length} lines`)
 
       // --- Verify the original repo is still clean (no leftover worktrees) ---

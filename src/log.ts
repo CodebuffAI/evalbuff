@@ -5,6 +5,8 @@
  * what the user sees in the terminal during a run.
  */
 
+import { roundLabel } from './report'
+
 import type { TaskResult } from './eval-runner'
 
 // --- Spinners & progress ---
@@ -107,7 +109,12 @@ export function printScoreTable(
   if (roundResults.length === 0) return
 
   const featureIds = [...new Set(roundResults.flatMap(r => r.tasks.map(t => t.featureId)))]
-  const colLabels = roundResults.map(r => r.round === 0 ? 'Base' : `L${r.round}`)
+  const colLabels = roundResults.map(r => {
+    const label = roundLabel(r.round, roundResults.length)
+    if (label === 'Baseline') return 'Base'
+    if (label === 'Final') return 'Final'
+    return `L${r.round}`
+  })
 
   const maxIdLen = Math.max(...featureIds.map(f => f.length), 16) // 16 for "Baseline rejudge"
   const colWidth = 6

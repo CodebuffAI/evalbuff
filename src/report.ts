@@ -234,6 +234,20 @@ export function saveRoundResults(logDir: string, roundResult: RoundResult): void
   fs.writeFileSync(path.join(roundDir, 'summary.json'), JSON.stringify(summary, null, 2))
 }
 
+/**
+ * Label a round by its index in the run.
+ *
+ * - Round 0 is always the baseline.
+ * - The last round is the "Final" verification round when there are at least
+ *   3 rounds (baseline + at least one improvement loop + final).
+ * - Everything else is a "Loop N" improvement round.
+ */
+export function roundLabel(round: number, totalRounds: number): string {
+  if (round === 0) return 'Baseline'
+  if (totalRounds >= 3 && round === totalRounds - 1) return 'Final'
+  return `Loop ${round}`
+}
+
 function formatDuration(start: string, end: string): string {
   const ms = new Date(end).getTime() - new Date(start).getTime()
   const mins = Math.floor(ms / 60000)
@@ -270,7 +284,7 @@ export function saveSummary(
     `| **End** | ${summary.endTime} |`,
     `| **Duration** | ${formatDuration(summary.startTime, summary.endTime)} |`,
     `| **Features carved** | ${summary.featuresCarved} |`,
-    `| **Improvement rounds** | ${Math.max(roundResults.length - 1, 0)} |`,
+    `| **Improvement rounds** | ${loopDocGateResults.length} |`,
     `| **Coding model** | ${opts.codingModel} |`,
     `| **Docs model** | ${opts.docsModel} |`,
     `| **Doc gate threshold** | ${loopDocGateResults[0]?.threshold?.toFixed(1) ?? 'n/a'} |`,
@@ -279,12 +293,13 @@ export function saveSummary(
   )
 
   // --- Score trajectory ---
+  const totalRounds = summary.scoreProgression.length
   push('## Score Trajectory', '')
   push('```')
-  for (let i = 0; i < summary.scoreProgression.length; i++) {
+  for (let i = 0; i < totalRounds; i++) {
     const score = summary.scoreProgression[i]
     const bar = '█'.repeat(Math.round(score * 2))
-    const label = i === 0 ? 'baseline' : `loop ${i}`
+    const label = roundLabel(i, totalRounds).toLowerCase()
     push(`${label.padEnd(12)} ${score.toFixed(1).padStart(5)}/10  ${bar}`)
   }
   push('```')
@@ -314,6 +329,10 @@ export function saveSummary(
     push('```')
 
     const judgeDelta = summary.baselineRejudgeProgression[summary.baselineRejudgeProgression.length - 1] - summary.scoreProgression[0]
+    // The "Final" round uses the same docs as the last baseline rejudge, so
+    // its score minus the rejudge isolates real agent improvement from judge
+    // recalibration. When the run ends on a Loop round (no Final), fall back
+    // to the overall trajectory delta.
     const agentDelta = delta - judgeDelta
     push(
       '',
@@ -327,7 +346,7 @@ export function saveSummary(
   push('## Scores by Round', '')
 
   const featureIds = [...new Set(roundResults.flatMap((r) => r.tasks.map((t) => t.featureId)))]
-  const headerCols = ['Feature', ...roundResults.map((r) => r.round === 0 ? 'Baseline' : `Loop ${r.round}`)]
+  const headerCols = ['Feature', ...roundResults.map((r) => roundLabel(r.round, roundResults.length))]
   push(`| ${headerCols.join(' | ')} |`)
   push(`| ${headerCols.map(() => '---').join(' | ')} |`)
 
@@ -384,8 +403,8 @@ export function saveSummary(
 
   // --- Per-round detail ---
   for (const round of roundResults) {
-    const roundLabel = round.round === 0 ? 'Baseline' : `Loop ${round.round}`
-    push(`## ${roundLabel} — Detail`, '')
+    const label = roundLabel(round.round, roundResults.length)
+    push(`## ${label} — Detail`, '')
 
     for (const task of round.tasks) {
       push(`### ${task.featureId} — ${task.score >= 0 ? `${task.score.toFixed(1)}/10` : 'FAILED'}`, '')
@@ -525,7 +544,11 @@ export function saveSummary(
   }
 
   // --- Final docs state ---
-  const lastLoop = Math.max(roundResults.length - 1, 0)
+  // The "last loop" is the last improvement loop that ran a docs writer pass,
+  // not the final verification round (which doesn't update docs).
+  const lastLoop = loopDocGateResults.length > 0
+    ? loopDocGateResults[loopDocGateResults.length - 1].loop
+    : 0
   const finalDocsFile = path.join(logDir, `docs-state-loop-${lastLoop}.json`)
   if (fs.existsSync(finalDocsFile)) {
     const finalDocs: Record<string, string> = JSON.parse(fs.readFileSync(finalDocsFile, 'utf-8'))

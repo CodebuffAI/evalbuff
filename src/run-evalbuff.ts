@@ -164,11 +164,12 @@ export async function runEvalRound(
     index: number
   }) => Promise<number | void>,
   deps: EvalRoundDeps = defaultEvalRoundDeps,
+  label?: string,
 ): Promise<RoundResult> {
-  const label = round === 0 ? 'Baseline' : `Round ${round}`
+  const roundLabel = label ?? (round === 0 ? 'Baseline' : `Round ${round}`)
   const results: TaskResult[] = []
 
-  deps.startSpinner(`${label}: evaluating 0/${features.length} features...`)
+  deps.startSpinner(`${roundLabel}: evaluating 0/${features.length} features...`)
 
   for (let i = 0; i < features.length; i++) {
     const feature = features[i]
@@ -221,7 +222,7 @@ export async function runEvalRound(
       }
       deps.events.send({ type: 'feature_status', featureId: feature.id, status: 'eval_failed', detail: msg.slice(0, 200) })
     }
-    deps.updateSpinner(`${label}: ${i + 1}/${features.length} features evaluated`)
+    deps.updateSpinner(`${roundLabel}: ${i + 1}/${features.length} features evaluated`)
   }
 
   deps.stopSpinner()
@@ -232,7 +233,7 @@ export async function runEvalRound(
     : 0
   const totalCost = results.reduce((a, r) => a + r.costEstimate, 0)
 
-  deps.printRoundScores(label, results, avgScore, totalCost, baselineAvg)
+  deps.printRoundScores(roundLabel, results, avgScore, totalCost, baselineAvg)
 
   deps.events.send({
     type: 'round_complete',
@@ -898,6 +899,8 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
         featureGateArtifacts.push(gated.artifacts)
         return gated.validationCost
       },
+      defaultEvalRoundDeps,
+      `Loop ${improvementRound}`,
     )
 
     totalCost += results.totalCost
@@ -931,6 +934,32 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
 
     const loopProjectSuggestions = collectProjectSuggestions(results.tasks.filter(t => t.score >= 0))
     if (loopProjectSuggestions) allProjectSuggestionSections.push(`## Improvement Round\n\n${loopProjectSuggestions}`)
+
+    // --- Final verification round ---
+    // Re-run all features against the now-frozen final docs (no docs gating)
+    // so we get a clean baseline-vs-final comparison. The improvement round's
+    // score is partially contaminated because docs change mid-round; this
+    // pure rerun isolates the real effect of the accepted docs.
+    const finalRound = improvementRound + 1
+    console.log(`\n\x1b[1mFinal Round\x1b[0m`)
+    events.send({ type: 'phase_change', phase: 'evaluating', round: finalRound, detail: 'Final verification with frozen docs' })
+    const finalResults = await runEvalRound(
+      features,
+      groundTruthDiffs,
+      opts,
+      finalRound,
+      baseline.avgScore,
+      undefined,
+      defaultEvalRoundDeps,
+      'Final',
+    )
+    saveRoundResults(logDir, finalResults)
+    totalCost += finalResults.totalCost
+    roundResults.push(finalResults)
+    scoreProgression = roundResults.map((round) => round.avgScore)
+
+    const finalProjectSuggestions = collectProjectSuggestions(finalResults.tasks.filter(t => t.score >= 0))
+    if (finalProjectSuggestions) allProjectSuggestionSections.push(`## Final Round\n\n${finalProjectSuggestions}`)
 
     // --- Generate project improvement prompts ---
     let projectPrompts: string[] = []

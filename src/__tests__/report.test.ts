@@ -4,7 +4,7 @@ import path from 'path'
 
 import { afterEach, describe, expect, it } from 'bun:test'
 
-import { saveLoopDocGateArtifacts } from '../report'
+import { roundLabel, saveLoopDocGateArtifacts } from '../report'
 
 import type { FeatureDocGateArtifacts } from '../report'
 
@@ -14,6 +14,28 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true })
   }
+})
+
+describe('roundLabel', () => {
+  it('labels round 0 as Baseline regardless of total rounds', () => {
+    expect(roundLabel(0, 1)).toBe('Baseline')
+    expect(roundLabel(0, 2)).toBe('Baseline')
+    expect(roundLabel(0, 3)).toBe('Baseline')
+  })
+
+  it('labels intermediate rounds as Loop N', () => {
+    expect(roundLabel(1, 3)).toBe('Loop 1')
+    expect(roundLabel(2, 4)).toBe('Loop 2')
+  })
+
+  it('labels the last round as Final when there are at least 3 rounds', () => {
+    expect(roundLabel(2, 3)).toBe('Final')
+    expect(roundLabel(3, 4)).toBe('Final')
+  })
+
+  it('still labels the last improvement round as Loop N when no Final round was run', () => {
+    expect(roundLabel(1, 2)).toBe('Loop 1')
+  })
 })
 
 describe('saveLoopDocGateArtifacts', () => {
