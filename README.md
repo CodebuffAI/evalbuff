@@ -1,14 +1,20 @@
 # Evalbuff
 
-**Improve your coding agent's performance through automated practice.**
+**Automate coding via offline practice.**
 
-Evalbuff runs your coding agent on practice tasks carved from your codebase, watches it fail, writes docs to fix the pattern, and keeps only the changes that measurably help. The result is a `docs/` directory of markdown files that encode the missing knowledge your agent needs to produce correct changes.
+Evalbuff improves your coding agent overnight:
 
-## Why it works
+- A background agent practices making changes in your codebase
+- Learnings are documented in markdown files
+- Only learnings that increase eval performance are kept
 
-Your coding agent is missing context. It doesn't understand your product. It edits the wrong package. It doesn't know how to verify changes end-to-end.
+## Why
 
-All of this is solvable with the right context — missing domain knowledge, subtle conventions, step-by-step verification workflows. And all of that context can be recorded in plain markdown files.
+Your coding agent needs more knowledge to do the best work in your codebase.
+
+We can discover what produces optimal performance through practice reconstructing your codebase.
+
+Markdown docs in a nested directory are all that's necessary to give the agent proper context on your project and how to end-to-end verify new changes.
 
 ### Hierarchical docs > skills
 
@@ -25,17 +31,17 @@ The goal isn't to produce docs that explain your project. The goal is to include
 
 ## How it works
 
-Evalbuff creates practice tasks by **carving** — surgically removing a feature from your codebase (deleting the relevant code while keeping everything else intact) and then challenging an agent to rebuild it from scratch. The original implementation serves as ground truth for judging the result.
+Evalbuff creates practice tasks by **carving** your codebase — surgically removing a feature from (deleting the relevant code while keeping everything else intact) and then challenging an agent to rebuild it from scratch. The original implementation serves as ground truth for judging the result.
 
 ```
 1. Identify features in the repo that can be cleanly carved out
 2. Carve a random subset of n features (delete the code, keep the rest)
-3. Baseline: have agents rebuild each carved feature in parallel, judge the results
    against the original implementation, collect scores + doc suggestions
-4. Loop N times:
-   a. Docs refactor agent reads judge suggestions and edits docs holistically
-   b. Re-eval: rebuild in parallel, judge, get new scores + doc suggestions
-   c. Keep only doc changes that improve scores
+3. Loop through each feature:
+   b. Rebuild the feature
+   c. Judge the result, including looking at the agent trace
+   a. A docs refactor agent reads the judge suggestions and makes indpendent docs changes
+   c. Keep only doc changes that improve scores (rerun agent + judge for each)
 ```
 
 ## Usage
@@ -55,8 +61,6 @@ bun run src/run-evalbuff.ts \
 |------|-------------|
 | `--repo` | Path to the repo to optimize docs for |
 | `--n` | Number of features to carve per eval round (default: 20) |
-| `--parallelism` | How many agent runs to execute in parallel (default: 3) |
-| `--loops` | Number of doc-improvement iterations (default: 3) |
 | `--init-command` | Setup command to run in the repo before each agent run (e.g. `npm install`) |
 | `--coding-model` | Model for the coding agent (default: sonnet) |
 | `--docs-model` | Model for the docs writer agent (default: opus) |
