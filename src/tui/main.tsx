@@ -71,8 +71,9 @@ function augmentFromFilesystem(logDir: string, seenEventTypes: Set<string>) {
       type: 'run_start',
       repoPath: summary?.repoPath || logDir,
       n: summary?.featuresCarved || 0,
-      loops: (summary?.rounds?.length ?? 1) - 1,
-      parallelism: 0, codingModel: '?', docsModel: '?', logDir,
+      codingModel: '?',
+      docsModel: '?',
+      logDir,
     })
   }
 
@@ -202,20 +203,20 @@ async function replayLogDir(logDir: string) {
 // --- Find recent log dirs ---
 
 function findRecentLogDirs(): string[] {
-  const tmpDir = require('os').tmpdir()
+  const dirs: string[] = []
+
+  // New default: scan .evalbuff/ in current working directory
+  const evalbuffDir = path.join(process.cwd(), '.evalbuff')
   try {
-    return fs.readdirSync(tmpDir)
-      .filter(name => name.startsWith('evalbuff-run-'))
-      .map(name => path.join(tmpDir, name))
-      .filter(p => {
-        try { return fs.statSync(p).isDirectory() } catch { return false }
-      })
-      .sort()
-      .reverse()
-      .slice(0, 10)
-  } catch {
-    return []
-  }
+    for (const name of fs.readdirSync(evalbuffDir)) {
+      if (name.startsWith('run-') || name.startsWith('perfect-')) {
+        const full = path.join(evalbuffDir, name)
+        try { if (fs.statSync(full).isDirectory()) dirs.push(full) } catch {}
+      }
+    }
+  } catch {}
+
+  return [...new Set(dirs)].sort().reverse().slice(0, 10)
 }
 
 // --- Demo mode ---
@@ -227,8 +228,6 @@ async function runDemo() {
     type: 'run_start',
     repoPath: '/Users/demo/my-project',
     n: 20,
-    loops: 2,
-    parallelism: 3,
     codingModel: 'sonnet',
     docsModel: 'opus',
     logDir: '/tmp/evalbuff-demo',
@@ -292,37 +291,12 @@ async function runDemo() {
   const avgLoop1 = Object.values(loop1Scores).reduce((a, b) => a + b, 0) / featureIds.length
   events.send({ type: 'round_complete', round: 1, avgScore: avgLoop1, totalCost: 4.68, scores: loop1Scores })
 
-  // Loop 2
-  await sleep(500)
-  events.send({ type: 'phase_change', phase: 'docs_writer', loop: 2 })
-  events.send({ type: 'docs_writer', action: 'start', loop: 2, suggestionCount: 8 })
-  await sleep(2000)
-  events.send({ type: 'docs_writer', action: 'complete', loop: 2 })
-
-  await sleep(300)
-  events.send({ type: 'phase_change', phase: 'evaluating', round: 2, loop: 2, detail: 'Re-eval with updated docs' })
-
-  const loop2Scores: Record<string, number> = {}
-  for (const id of featureIds) {
-    events.send({ type: 'feature_status', featureId: id, status: 'agent_running' })
-    await sleep(1000 + Math.random() * 1000)
-    events.send({ type: 'feature_status', featureId: id, status: 'judging' })
-    await sleep(500 + Math.random() * 400)
-    const improvement = 0.3 + Math.random() * 1.0
-    const score = Math.min(10, loop1Scores[id] + improvement)
-    loop2Scores[id] = Math.round(score * 10) / 10
-    events.send({ type: 'feature_status', featureId: id, status: 'scored', score: loop2Scores[id], cost: 0.15 + Math.random() * 0.3 })
-  }
-
-  const avgLoop2 = Object.values(loop2Scores).reduce((a, b) => a + b, 0) / featureIds.length
-  events.send({ type: 'round_complete', round: 2, avgScore: avgLoop2, totalCost: 7.02, scores: loop2Scores })
-
   await sleep(500)
   events.send({
     type: 'run_complete',
-    scoreProgression: [avgBaseline, avgLoop1, avgLoop2],
-    totalCost: 7.02,
-    duration: '3m 45s',
+    scoreProgression: [avgBaseline, avgLoop1],
+    totalCost: 4.68,
+    duration: '2m 10s',
   })
 }
 
@@ -369,14 +343,13 @@ async function main() {
 
     const repoPath = getArg('repo')
     const n = parseInt(getArg('n', '5'))
-    const parallelism = parseInt(getArg('parallelism', '10'))
-    const loops = parseInt(getArg('loops', '3'))
     const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
     const codingModel = getArg('coding-model', 'sonnet')
     const docsModel = getArg('docs-model', 'opus')
     const cachedFeatures = hasArg('cached-features') ? getArg('cached-features') : undefined
+    const outputDir = hasArg('output-dir') ? getArg('output-dir') : undefined
 
-    runEvalbuff({ repoPath, n, parallelism, loops, initCommand, codingModel, docsModel, cachedFeatures }).catch(err => {
+    runEvalbuff({ repoPath, n, initCommand, codingModel, docsModel, cachedFeatures, outputDir }).catch(err => {
       events.log(`Run failed: ${err}`, 'error')
     })
   } else {

@@ -69,6 +69,7 @@ export interface LoopData {
   loop: number
   judgeSuggestions: string
   docsDiff: string
+  docGates: unknown | null
 }
 
 export interface RunSummary {
@@ -165,6 +166,7 @@ export function loadLogDir(logDir: string): LogDirData {
       loop: l,
       judgeSuggestions: readTextSafe(suggestionsPath),
       docsDiff: readTextSafe(path.join(logDir, `docs-diff-loop-${l}.txt`)),
+      docGates: readJsonSafe(path.join(logDir, `doc-gates-loop-${l}.json`)),
     })
   }
 

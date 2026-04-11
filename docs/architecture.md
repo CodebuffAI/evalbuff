@@ -2,13 +2,13 @@
 
 ## Pipeline Overview
 
-Evalbuff follows a plan → carve → evaluate → refactor loop:
+Evalbuff follows a plan → carve → baseline → gated improvement round:
 
 1. **Plan** — `planFeatures()` in `src/carve-features.ts` uses a Codex agent to scan the target repo and identify 15–25 discrete features that can be cleanly removed.
 2. **Carve** — `carveFeature()` creates an isolated git worktree, runs a Codex agent to remove the feature, and captures the resulting diff and file operations.
-3. **Evaluate** — `runAgentOnCarve()` in `src/eval-runner.ts` clones the repo, applies the carve, copies current docs, runs a coding agent to rebuild the feature, then hands the result to `judgeTaskResult()` in `src/judge.ts`.
-4. **Write docs** — `runDocsWriterAgent()` in `src/docs-writer.ts` collects judge suggestions and runs a Claude agent in a temp clone to edit `docs/`, `AGENTS.md`, and `CLAUDE.md`.
-5. **Repeat** — Steps 3–4 loop N times. Each loop also re-judges the baseline diffs with current docs to separate judge recalibration from real agent improvement.
+3. **Baseline** — `runAgentOnCarve()` in `src/eval-runner.ts` clones the repo, applies the carve, copies current docs, runs a coding agent to rebuild the feature, then hands the result to `judgeTaskResult()` in `src/judge.ts`.
+4. **Gate docs changes** — during the improvement round, every feature is re-run sequentially. The judge and coding agent both suggest independent docs changes. `planDocsChangesForTask()` in `src/docs-writer.ts` reads the docs once, rejects overfit/low-value suggestions, and creates one independent committed docs candidate per surviving suggestion. Evalbuff then materializes each candidate patch onto the current docs state, re-judges the originating task, and optionally re-runs the coding agent before accepting it.
+5. **Baseline rejudge** — after the improvement round, Evalbuff re-judges the baseline diffs with the updated docs to separate judge recalibration from real agent improvement.
 
 ## Key Modules
 
@@ -19,7 +19,7 @@ Evalbuff follows a plan → carve → evaluate → refactor loop:
 | `src/eval-helpers.ts` | Git/docs utilities — carve ops, docs sync, diff capture, ground-truth computation |
 | `src/carve-features.ts` | Feature identification and extraction via Codex agents in git worktrees |
 | `src/judge.ts` | Codex-based reviewer that scores agent output with E2E testing |
-| `src/docs-writer.ts` | Holistic docs editing agent + judge suggestion collector |
+| `src/docs-writer.ts` | Coding-agent suggestion parsing + per-task docs-change planning/materialization |
 | `src/perfect-feature.ts` | Single-feature iterative optimizer (rebuild → judge → diagnose → update docs) |
 | `src/report.ts` | Persists round results and generates `summary.json` + `report.md` |
 | `src/trace-compressor.ts` | Extracts large tool outputs from traces into content-addressed sidecar files |
@@ -36,14 +36,13 @@ Target repo
   ↓ carveFeature() → CarvedFeature[]
   ↓ [saved as features.json]
   ↓
-  ↓ For each round:
-  ↓   runAgentOnCarve() → TaskResult (per feature, in parallel)
+  ↓ Baseline round:
+  ↓   runAgentOnCarve() → TaskResult (per feature, sequentially)
   ↓   saveRoundResults() → round-N/ directory
   ↓
-  ↓ For each improvement loop:
-  ↓   collectDocSuggestions() → text
-  ↓   runDocsWriterAgent() → edits docs in target repo
+  ↓ Improvement round:
   ↓   runEvalRound() → new scores
+  ↓   gateDocsChangesForTask() → per-feature accepted/rejected doc candidates
   ↓   runBaselineRejudgeRound() → re-scored baseline
   ↓
   ↓ saveSummary() → summary.json + report.md
@@ -67,14 +66,14 @@ Most workflows (eval, docs writer, judging) operate in temporary clones, not the
 
 ### Docs Refactor Pattern
 
-`runDocsWriterAgent()` in `src/docs-writer.ts` builds a holistic prompt, not a task-specific checklist. The prompt tells the agent to:
-1. Read all current docs (`docs/`, `AGENTS.md`, `CLAUDE.md`).
-2. Generalize judge feedback into reusable project patterns — avoid feature-specific examples.
-3. Verify every referenced symbol/path with grep before documenting it.
-4. Restrict `AGENTS.md` changes to doc-index maintenance or factual corrections.
-5. Sync docs back only after a successful run.
+`planDocsChangesForTask()` in `src/docs-writer.ts` does one planning pass per feature. The prompt tells the agent to:
+1. Read all current docs (`docs/`, `AGENTS.md`, `CLAUDE.md`) once.
+2. Reject suggestions that are overfit, already covered, low-priority, or not grounded in the current code.
+3. For each surviving suggestion, create one independent docs-only commit on its own branch from the same baseline docs commit.
+4. Reset back to the baseline docs commit before preparing the next candidate so branches stay independent.
+5. Write a manifest explaining which suggestions were accepted or rejected and why.
 
-When building similar doc-editing agents, follow the same holistic approach: read first, generalize, verify, then write.
+When building similar doc-editing agents, favor one read-heavy planning pass that emits independently replayable doc changes instead of rereading the full docs corpus for every candidate.
 
 ## Orchestration Patterns
 
@@ -96,7 +95,7 @@ When modifying the orchestration (new `EvalbuffOptions` fields, new phases, new 
 
 ## Concurrency
 
-Eval rounds use bounded concurrency: `opts.parallelism` workers pull from a shared queue. Each worker runs a full clone → carve → agent → judge cycle independently.
+Carving uses a fixed internal worker pool in `src/run-evalbuff.ts` to speed up feature extraction, while baseline evaluation, docs gating, and baseline rejudging stay sequential. The sequential improvement round still matters because accepted docs changes from one feature should affect the very next feature.
 
 ## Events and TUI
 

@@ -3,7 +3,7 @@
  * Evalbuff CLI entry point.
  *
  * Usage:
- *   evalbuff --repo /path/to/repo [--n 20] [--parallelism 10] [--loops 3]
+ *   evalbuff --repo /path/to/repo [--n 20]
  *            [--init-command "npm install"] [--coding-model sonnet] [--docs-model opus]
  *            [--cached-features /path/to/features.json]
  */
@@ -27,12 +27,11 @@ if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
 Options:
   --repo <path>              Path to the target repository (required)
   --n <number>               Number of features to evaluate (default: 20)
-  --parallelism <number>     Max parallel agent runs (default: 10)
-  --loops <number>           Number of optimization loops (default: 3)
   --init-command <command>   Command to run before each agent run
   --coding-model <model>     Model for coding agent (default: sonnet)
   --docs-model <model>       Model for docs agent (default: opus)
   --cached-features <path>   Path to pre-computed features JSON
+  --output-dir <path>        Base directory for run artifacts (default: <repo>/.evalbuff)
   -V, --version              Show version number
   -h, --help                 Show this help message`)
   process.exit(0)
@@ -48,22 +47,20 @@ const hasArg = (name: string): boolean => args.includes(`--${name}`)
 
 const repoPath = getArg('repo')
 const n = parseInt(getArg('n', '20'))
-const parallelism = parseInt(getArg('parallelism', '10'))
-const loops = parseInt(getArg('loops', '3'))
 const initCommand = hasArg('init-command') ? getArg('init-command') : undefined
 const codingModel = getArg('coding-model', 'sonnet')
 const docsModel = getArg('docs-model', 'opus')
 const cachedFeatures = hasArg('cached-features') ? getArg('cached-features') : undefined
+const outputDir = hasArg('output-dir') ? getArg('output-dir') : undefined
 
 runEvalbuff({
   repoPath,
   n,
-  parallelism,
-  loops,
   initCommand,
   codingModel,
   docsModel,
   cachedFeatures,
+  outputDir,
 }).catch((error) => {
   console.error('Evalbuff run failed:', error)
   process.exit(1)

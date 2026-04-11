@@ -5,12 +5,62 @@ import { compressAndSave } from './trace-compressor'
 
 import type { TaskResult } from './eval-runner'
 import type { JudgingResult } from './judge'
+import type { SuggestionSource } from './docs-writer'
 
 export interface RoundResult {
   round: number
   tasks: TaskResult[]
   avgScore: number
   totalCost: number
+}
+
+export interface DocChangeGateCandidateResult {
+  source: SuggestionSource
+  priority: number
+  text: string
+  accepted: boolean
+  fastAccepted: boolean
+  status:
+    | 'accepted'
+    | 'accepted_fast_rejudge'
+    | 'rejected'
+    | 'rejected_overfit'
+    | 'rejected_no_change'
+    | 'rejected_writer_failed'
+    | 'rejected_rejudge_failed'
+    | 'rejected_rerun_failed'
+    | 'skipped_low_priority'
+  reason: string
+  baseScore: number
+  rejudgeScore?: number
+  rerunScore?: number
+  gateDelta?: number
+  docsDiff: string
+}
+
+export interface FeatureDocGateResult {
+  featureId: string
+  baseScore: number
+  candidates: DocChangeGateCandidateResult[]
+}
+
+export interface DocChangeGateCandidateArtifacts {
+  summary: DocChangeGateCandidateResult
+  docsPatchText?: string
+  rejudgeJudging?: JudgingResult
+  rerunTask?: TaskResult
+}
+
+export interface FeatureDocGateArtifacts {
+  featureId: string
+  candidates: DocChangeGateCandidateArtifacts[]
+}
+
+export interface LoopDocGateResult {
+  loop: number
+  threshold: number
+  fastAcceptThreshold: number
+  features: FeatureDocGateResult[]
 }
 
 export interface EvalSummary {
@@ -31,11 +81,12 @@ export interface EvalSummary {
   // scoreProgression[0]. A flat or rising line here with a rising agent line
   // suggests the docs are improving the agent beyond just judge recalibration.
   baselineRejudgeProgression?: number[]
+  consideredDocChangesByLoop?: number[]
+  acceptedDocChangesByLoop?: number[]
   projectPrompts?: string[]
 }
 
 export interface EvalOptions {
-  loops: number
   codingModel: string
   docsModel: string
 }
@@ -65,6 +116,81 @@ export function saveBaselineRejudgeResults(logDir: string, roundResult: RoundRes
   fs.writeFileSync(path.join(roundDir, 'summary.json'), JSON.stringify(summary, null, 2))
 }
 
+export function saveLoopDocGateResults(
+  logDir: string,
+  loopResult: LoopDocGateResult,
+): void {
+  fs.writeFileSync(
+    path.join(logDir, `doc-gates-loop-${loopResult.loop}.json`),
+    JSON.stringify(loopResult, null, 2),
+  )
+}
+
+function sanitizePathSegment(value: string): string {
+  const normalized = value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+  return normalized || 'item'
+}
+
+export function saveLoopDocGateArtifacts(
+  logDir: string,
+  loop: number,
+  features: FeatureDocGateArtifacts[],
+): void {
+  const rootDir = path.join(logDir, `doc-candidates-loop-${loop}`)
+  fs.mkdirSync(rootDir, { recursive: true })
+
+  for (const feature of features) {
+    const featureDir = path.join(rootDir, sanitizePathSegment(feature.featureId))
+    fs.mkdirSync(featureDir, { recursive: true })
+
+    for (let i = 0; i < feature.candidates.length; i++) {
+      const candidate = feature.candidates[i]
+      const candidateDir = path.join(featureDir, `candidate-${String(i + 1).padStart(2, '0')}`)
+      fs.mkdirSync(candidateDir, { recursive: true })
+
+      fs.writeFileSync(path.join(candidateDir, 'metadata.json'), JSON.stringify(candidate.summary, null, 2))
+      fs.writeFileSync(path.join(candidateDir, 'suggestion.txt'), candidate.summary.text + '\n')
+
+      if (candidate.docsPatchText && candidate.docsPatchText.trim()) {
+        fs.writeFileSync(path.join(candidateDir, 'docs.patch'), candidate.docsPatchText)
+      }
+
+      if (candidate.summary.docsDiff.trim()) {
+        fs.writeFileSync(path.join(candidateDir, 'docs-diff.txt'), candidate.summary.docsDiff)
+      }
+
+      if (candidate.rejudgeJudging) {
+        fs.writeFileSync(
+          path.join(candidateDir, 'rejudge.json'),
+          JSON.stringify(candidate.rejudgeJudging, null, 2),
+        )
+      }
+
+      if (candidate.rerunTask) {
+        const tracePath = path.join(candidateDir, 'rerun-trace.txt')
+        fs.writeFileSync(tracePath, candidate.rerunTask.trace)
+        compressAndSave(tracePath, candidate.rerunTask.trace).catch((err: unknown) => {
+          console.warn(`[report] Failed to compress rerun trace for ${feature.featureId}: ${err}`)
+        })
+
+        fs.writeFileSync(path.join(candidateDir, 'rerun-diff.txt'), candidate.rerunTask.diff)
+        fs.writeFileSync(
+          path.join(candidateDir, 'rerun-judging.json'),
+          JSON.stringify(candidate.rerunTask.judging, null, 2),
+        )
+        fs.writeFileSync(path.join(candidateDir, 'rerun-score.txt'), candidate.rerunTask.score.toString())
+        fs.writeFileSync(
+          path.join(candidateDir, 'rerun-agent-suggestions.json'),
+          JSON.stringify({
+            docSuggestions: candidate.rerunTask.agentDocSuggestions,
+            projectSuggestions: candidate.rerunTask.agentProjectSuggestions,
+          }, null, 2),
+        )
+      }
+    }
+  }
+}
+
 export function saveRoundResults(logDir: string, roundResult: RoundResult): void {
   const roundDir = path.join(logDir, `round-${roundResult.round}`)
   fs.mkdirSync(roundDir, { recursive: true })
@@ -85,6 +211,13 @@ export function saveRoundResults(logDir: string, roundResult: RoundResult): void
 
     fs.writeFileSync(path.join(taskDir, 'diff.txt'), task.diff)
     fs.writeFileSync(path.join(taskDir, 'judging.json'), JSON.stringify(task.judging, null, 2))
+    fs.writeFileSync(
+      path.join(taskDir, 'agent-suggestions.json'),
+      JSON.stringify({
+        docSuggestions: task.agentDocSuggestions,
+        projectSuggestions: task.agentProjectSuggestions,
+      }, null, 2),
+    )
     fs.writeFileSync(path.join(taskDir, 'score.txt'), task.score.toString())
   }
 
@@ -99,6 +232,20 @@ export function saveRoundResults(logDir: string, roundResult: RoundResult): void
     })),
   }
   fs.writeFileSync(path.join(roundDir, 'summary.json'), JSON.stringify(summary, null, 2))
+}
+
+/**
+ * Label a round by its index in the run.
+ *
+ * - Round 0 is always the baseline.
+ * - The last round is the "Final" verification round when there are at least
+ *   3 rounds (baseline + at least one improvement loop + final).
+ * - Everything else is a "Loop N" improvement round.
+ */
+export function roundLabel(round: number, totalRounds: number): string {
+  if (round === 0) return 'Baseline'
+  if (totalRounds >= 3 && round === totalRounds - 1) return 'Final'
+  return `Loop ${round}`
 }
 
 function formatDuration(start: string, end: string): string {
@@ -116,6 +263,7 @@ export function saveSummary(
   roundResults: RoundResult[],
   opts: EvalOptions,
   baselineRejudgeResults: RoundResult[] = [],
+  loopDocGateResults: LoopDocGateResult[] = [],
   projectPrompts: string[] = [],
 ): void {
   fs.writeFileSync(path.join(logDir, 'summary.json'), JSON.stringify(summary, null, 2))
@@ -136,20 +284,22 @@ export function saveSummary(
     `| **End** | ${summary.endTime} |`,
     `| **Duration** | ${formatDuration(summary.startTime, summary.endTime)} |`,
     `| **Features carved** | ${summary.featuresCarved} |`,
-    `| **Improvement loops** | ${opts.loops} |`,
+    `| **Improvement rounds** | ${loopDocGateResults.length} |`,
     `| **Coding model** | ${opts.codingModel} |`,
     `| **Docs model** | ${opts.docsModel} |`,
+    `| **Doc gate threshold** | ${loopDocGateResults[0]?.threshold?.toFixed(1) ?? 'n/a'} |`,
     `| **Total cost** | $${summary.totalCost.toFixed(2)} |`,
     '',
   )
 
   // --- Score trajectory ---
+  const totalRounds = summary.scoreProgression.length
   push('## Score Trajectory', '')
   push('```')
-  for (let i = 0; i < summary.scoreProgression.length; i++) {
+  for (let i = 0; i < totalRounds; i++) {
     const score = summary.scoreProgression[i]
     const bar = '█'.repeat(Math.round(score * 2))
-    const label = i === 0 ? 'baseline' : `loop ${i}`
+    const label = roundLabel(i, totalRounds).toLowerCase()
     push(`${label.padEnd(12)} ${score.toFixed(1).padStart(5)}/10  ${bar}`)
   }
   push('```')
@@ -179,6 +329,10 @@ export function saveSummary(
     push('```')
 
     const judgeDelta = summary.baselineRejudgeProgression[summary.baselineRejudgeProgression.length - 1] - summary.scoreProgression[0]
+    // The "Final" round uses the same docs as the last baseline rejudge, so
+    // its score minus the rejudge isolates real agent improvement from judge
+    // recalibration. When the run ends on a Loop round (no Final), fall back
+    // to the overall trajectory delta.
     const agentDelta = delta - judgeDelta
     push(
       '',
@@ -192,7 +346,7 @@ export function saveSummary(
   push('## Scores by Round', '')
 
   const featureIds = [...new Set(roundResults.flatMap((r) => r.tasks.map((t) => t.featureId)))]
-  const headerCols = ['Feature', ...roundResults.map((r) => r.round === 0 ? 'Baseline' : `Loop ${r.round}`)]
+  const headerCols = ['Feature', ...roundResults.map((r) => roundLabel(r.round, roundResults.length))]
   push(`| ${headerCols.join(' | ')} |`)
   push(`| ${headerCols.map(() => '---').join(' | ')} |`)
 
@@ -237,10 +391,20 @@ export function saveSummary(
     push('')
   }
 
+  if (summary.acceptedDocChangesByLoop && summary.acceptedDocChangesByLoop.length > 0) {
+    push('## Doc Change Gating', '')
+    for (let i = 0; i < summary.acceptedDocChangesByLoop.length; i++) {
+      const accepted = summary.acceptedDocChangesByLoop[i]
+      const considered = summary.consideredDocChangesByLoop?.[i] ?? accepted
+      push(`- Loop ${i + 1}: accepted ${accepted}/${considered} candidate doc changes`)
+    }
+    push('')
+  }
+
   // --- Per-round detail ---
   for (const round of roundResults) {
-    const roundLabel = round.round === 0 ? 'Baseline' : `Loop ${round.round}`
-    push(`## ${roundLabel} — Detail`, '')
+    const label = roundLabel(round.round, roundResults.length)
+    push(`## ${label} — Detail`, '')
 
     for (const task of round.tasks) {
       push(`### ${task.featureId} — ${task.score >= 0 ? `${task.score.toFixed(1)}/10` : 'FAILED'}`, '')
@@ -295,6 +459,12 @@ export function saveSummary(
         push('')
       }
 
+      if (task.agentDocSuggestions.length > 0) {
+        push('**Coding agent doc suggestions:**')
+        for (const s of task.agentDocSuggestions) push(`- [P${s.priority}] ${s.text}`)
+        push('')
+      }
+
       // Project suggestions
       const projSuggestions = task.judging.projectSuggestions
       if (projSuggestions && projSuggestions.length > 0) {
@@ -303,16 +473,22 @@ export function saveSummary(
         push('')
       }
 
+      if (task.agentProjectSuggestions.length > 0) {
+        push('**Coding agent project suggestions:**')
+        for (const s of task.agentProjectSuggestions) push(`- [P${s.priority}] ${s.text}`)
+        push('')
+      }
+
       push(`**Cost:** $${task.costEstimate.toFixed(2)}`, '')
     }
 
-    // Judge suggestions file for non-baseline rounds
+    // Doc gate summary for non-baseline rounds
     if (round.round > 0) {
       const suggestionsFile = path.join(logDir, `judge-suggestions-loop-${round.round}.txt`)
       if (fs.existsSync(suggestionsFile)) {
         const suggestionsText = fs.readFileSync(suggestionsFile, 'utf-8')
         if (suggestionsText.trim()) {
-          push(`### Judge Suggestions Applied (Loop ${round.round})`, '')
+          push(`### Doc Gate Summary (Loop ${round.round})`, '')
           push('```')
           push(suggestionsText)
           push('```', '')
@@ -335,6 +511,28 @@ export function saveSummary(
     }
   }
 
+  if (loopDocGateResults.length > 0) {
+    push('## Per-Candidate Doc Gates', '')
+    for (const loopResult of loopDocGateResults) {
+      push(`### Loop ${loopResult.loop}`, '')
+      for (const feature of loopResult.features) {
+        if (feature.candidates.length === 0) continue
+        push(`#### ${feature.featureId}`, '')
+        for (const candidate of feature.candidates) {
+          const scores = [
+            `base ${candidate.baseScore.toFixed(1)}`,
+            candidate.rejudgeScore !== undefined ? `rejudge ${candidate.rejudgeScore.toFixed(1)}` : null,
+            candidate.rerunScore !== undefined ? `rerun ${candidate.rerunScore.toFixed(1)}` : null,
+          ].filter(Boolean).join(' -> ')
+          push(`- [${candidate.accepted ? 'accepted' : 'rejected'}] [${candidate.source}] [P${candidate.priority}] ${candidate.text}`)
+          push(`  ${scores}${candidate.gateDelta !== undefined ? ` | gate ${candidate.gateDelta >= 0 ? '+' : ''}${candidate.gateDelta.toFixed(1)}` : ''}`)
+          push(`  ${candidate.reason}`)
+        }
+        push('')
+      }
+    }
+  }
+
   // --- Project improvement prompts ---
   if (projectPrompts.length > 0) {
     push('## Project Improvement Prompts', '')
@@ -346,7 +544,11 @@ export function saveSummary(
   }
 
   // --- Final docs state ---
-  const lastLoop = opts.loops
+  // The "last loop" is the last improvement loop that ran a docs writer pass,
+  // not the final verification round (which doesn't update docs).
+  const lastLoop = loopDocGateResults.length > 0
+    ? loopDocGateResults[loopDocGateResults.length - 1].loop
+    : 0
   const finalDocsFile = path.join(logDir, `docs-state-loop-${lastLoop}.json`)
   if (fs.existsSync(finalDocsFile)) {
     const finalDocs: Record<string, string> = JSON.parse(fs.readFileSync(finalDocsFile, 'utf-8'))

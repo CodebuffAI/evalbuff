@@ -5,6 +5,8 @@
  * what the user sees in the terminal during a run.
  */
 
+import { roundLabel } from './report'
+
 import type { TaskResult } from './eval-runner'
 
 // --- Spinners & progress ---
@@ -67,14 +69,13 @@ function scoreDelta(before: number, after: number): string {
 export function printHeader(opts: {
   repoPath: string
   n: number
-  loops: number
   codingModel: string
   docsModel: string
   logDir: string
 }): void {
   console.log(`\n\x1b[1mEvalbuff Run\x1b[0m`)
   console.log(`  Repo: ${opts.repoPath}`)
-  console.log(`  Features: ${opts.n} | Loops: ${opts.loops} | Models: ${opts.codingModel}/${opts.docsModel}`)
+  console.log(`  Features: ${opts.n} | Models: ${opts.codingModel}/${opts.docsModel}`)
   console.log(`  Logs: ${opts.logDir}`)
 }
 
@@ -108,7 +109,12 @@ export function printScoreTable(
   if (roundResults.length === 0) return
 
   const featureIds = [...new Set(roundResults.flatMap(r => r.tasks.map(t => t.featureId)))]
-  const colLabels = roundResults.map(r => r.round === 0 ? 'Base' : `L${r.round}`)
+  const colLabels = roundResults.map(r => {
+    const label = roundLabel(r.round, roundResults.length)
+    if (label === 'Baseline') return 'Base'
+    if (label === 'Final') return 'Final'
+    return `L${r.round}`
+  })
 
   const maxIdLen = Math.max(...featureIds.map(f => f.length), 16) // 16 for "Baseline rejudge"
   const colWidth = 6

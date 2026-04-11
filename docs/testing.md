@@ -4,18 +4,72 @@
 
 ```bash
 bun run typecheck          # TypeScript strict check
-bun run test               # Unit tests only (excludes *.e2e.test.ts)
+bun run test               # Unit tests only (excludes *.e2e.test.ts and test-repos/**)
 bun run test:all           # All tests including E2E
 bun run test:e2e           # E2E tests only
 ```
 
-**`bun run test` vs `bun test`**: `bun run test` is the unit-test entrypoint because it applies the repo's `--path-ignore-patterns '**/*.e2e.test.ts'` filter. Bare `bun test` executes all discovered tests and may run live-model E2E cases when provider environment variables are present. Use `bun run typecheck && bun run test` for local verification of ordinary code changes. Reserve `bun test` or `bun run test:all` for environments where network access and provider credentials are intentionally available.
+**`bun run test` vs `bun test`**: `bun run test` is the unit-test entrypoint because it applies the repo's `--path-ignore-patterns '**/*.e2e.test.ts'` and `--path-ignore-patterns 'test-repos/**'` filters. Bare `bun test` executes all discovered tests and may run live-model E2E cases when provider environment variables are present. It can also descend into generated benchmark repos under `test-repos/`. Use `bun run typecheck && bun run test` for local verification of ordinary code changes. Reserve `bun test` or `bun run test:all` for environments where network access and provider credentials are intentionally available.
 
 **Verification workflow**: For code changes, run in this order: (1) `bun test src/__tests__/<module>.test.ts` for the changed area, (2) `bun run typecheck`, (3) `bun run test` for all unit tests, (4) optionally `bun test` for live-model E2E coverage. Provider/network failures in step 4 should be reported separately from patch regressions, with the exact failing file and provider error message.
+
+### Subprocess Verification for Bun Startup Behavior
+
+Changes to `bunfig.toml`, `src/load-env.ts`, or any other Bun preload script require a **subprocess-level** verification step in addition to parser unit tests. Parser-only unit tests are insufficient because Bun itself may prepopulate `process.env` before preload scripts execute, and the preload lifecycle (file resolution, load order, double-loading between top-level and `[test]` sections) is only exercised in a real Bun subprocess.
+
+**Recipe**: Create temporary `.env.local` and `.env` files in the repo root (or a temp cwd that shares the same `bunfig.toml`), then run both `bun run <probe.ts>` and `bun test <probe.test.ts>` as subprocesses and assert on their stdout/exit codes. The probe scripts should cover at least these cases:
+
+1. **Precedence**: A key defined in both `.env.local` and `.env` must resolve to the `.env.local` value.
+2. **Fallback**: A key present only in `.env` (absent from `.env.local`) must still load.
+3. **Export syntax**: `export KEY=value` lines must be accepted (the `export` prefix is optional).
+4. **Hash preservation**: `#` inside URLs or quoted strings (e.g., `URL=https://example.com/#frag`, `QUOTED="#val"`) must be preserved as literal characters, while `value # comment` must have the inline comment trimmed.
+
+This ensures the full Bun → preload → env file chain works end-to-end, not just the parser in isolation.
 
 ## Prerequisites
 
 Fresh workspaces (e.g., carved eval repos) may not have dependencies installed. Always run `bun install` or `bash setup.sh` before expecting `bun run typecheck` or `bun test` to succeed. A task is not complete until both commands pass after dependencies are installed.
+
+Local developer credentials can live in `.env.local`. `bunfig.toml` preloads `src/load-env.ts`, so direct Bun invocations such as `bun test src/__tests__/docs-writer.e2e.test.ts` and `bun run src/run-evalbuff.ts ...` automatically read `.env.local` first, then `.env`, without requiring wrapper scripts.
+
+### `parseEnvFile` Contract
+
+`parseEnvFile(content)` in `src/load-env.ts` is a **pure parser** (no I/O, no `process.env` access). It returns `Array<[key, value]>` with these rules:
+
+| Rule | Detail |
+|---|---|
+| Key format | Must match `^[A-Za-z_][A-Za-z0-9_]*$`. Lines with invalid keys are silently skipped. |
+| `export` prefix | Optional — `export KEY=value` and `KEY=value` are both accepted. |
+| Blank lines / comments | Lines that are empty or start with `#` are skipped. |
+| Quoting | Surrounding `"..."` or `'...'` are stripped from the value. |
+| Inline comments | `#` preceded by whitespace, outside quotes, is treated as a comment start; the value is trimmed before it. |
+| Hash in values | `#` inside quoted strings or not preceded by whitespace is preserved literally. |
+
+**Example input and expected output**:
+
+```
+# Database config
+DB_HOST=localhost
+export DB_PORT=5432
+API_URL=https://example.com/api#v2
+QUOTED_HASH="#still-a-value"
+SECRET="s3cret"   # rotate quarterly
+MALFORMED LINE
+```
+
+Expected parse result:
+
+```
+[
+  ["DB_HOST",      "localhost"],
+  ["DB_PORT",      "5432"],
+  ["API_URL",      "https://example.com/api#v2"],
+  ["QUOTED_HASH",  "#still-a-value"],
+  ["SECRET",       "s3cret"]
+]
+```
+
+Note: `MALFORMED LINE` is silently skipped (key contains a space). The inline comment on `SECRET` is stripped. The `#v2` fragment in `API_URL` is preserved because `#` is not preceded by whitespace.
 
 ## Test File Layout
 
@@ -74,6 +128,20 @@ When tests produce diffs, validate both representations:
 
 This catches cases where patch text looks valid but serialized file operations do not recreate the same filesystem state.
 
+### All Operation Types
+
+Carve diffs can include file deletions, modifications, and additions. Git status `'A'` (added files) is mapped to `FileOperation` with `action: 'modify'` and the full file content as `newContent` — there is no separate `'add'` action. Diff validation tests must cover all three git-level operation types:
+
+- **Delete**: Assert the file is absent after `applyCarveOperations()` and that the diff contains the deletion.
+- **Modify**: Assert the file content matches `op.newContent`.
+- **Add (as modify)**: Create a test where the carve introduces a new file. Assert that `applyCarveOperations()` creates the file with the correct content (it calls `fs.mkdirSync` with `{ recursive: true }` before writing, so nested new paths are handled). Verify the diff also includes the addition and passes `git apply --check`.
+
+When testing carve output end-to-end, apply `applyCarveOperations(repoDir, feature.operations)` to a fresh checkout at the same base SHA and compare the resulting filesystem to the actual carved worktree state. This catches drift between the diff text and the serialized operations.
+
+### No-Op Carve Behavior
+
+`carveFeature()` returns `null` when the carve produces an empty diff (`!diff.trim()`). Callers skip null results — a no-op carve is not treated as a successful `CarvedFeature`. Tests should assert that `carveFeature()` returns `null` (not an empty-diff `CarvedFeature`) when the agent makes no changes, and that the caller's feature list does not contain entries with empty diffs or empty `originalFiles`.
+
 ## Infrastructure Failure Testing
 
 `runAgentOnCarve()` must never throw for infrastructure failures — it returns a `TaskResult` with `score: -1`, empty `diff`, `costEstimate: 0`, `trace` starting with `Agent error:`, and all judging scores set to `-1`. Test by calling with a nonexistent `repoPath` so `git clone` fails before the agent runs.
@@ -120,7 +188,7 @@ const SKIP = !process.env.OPENAI_API_KEY || !(process.env.CLAUDE_CODE_KEY || pro
 it.skipIf(SKIP)('full pipeline', async () => { ... })
 ```
 
-Build a temp git repo with at least 2 distinct feature areas and lightweight repo-local tests. Assert the real artifact structure from `docs/run-artifacts.md`: `plan.json`, `features.json`, `round-0/`, subsequent rounds, `baseline-rejudge-loop-N/`, loop artifacts, `summary.json`, `report.md`, and `git worktree list` cleanup. Any change to artifact persistence contracts must be verified by updating these assertions.
+Build a temp git repo with at least 2 distinct feature areas and lightweight repo-local tests. Assert the real artifact structure from `docs/run-artifacts.md`: `plan.json`, `features.json`, `round-0/`, subsequent rounds, `baseline-rejudge-loop-N/`, loop artifacts including `doc-gates-loop-N.json`, `summary.json`, `report.md`, and `git worktree list` cleanup. Any change to artifact persistence contracts must be verified by updating these assertions.
 
 ## Preserving Failed E2E Runs
 

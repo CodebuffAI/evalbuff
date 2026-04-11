@@ -29,8 +29,6 @@ export interface RunStartEvent {
   type: 'run_start'
   repoPath: string
   n: number
-  loops: number
-  parallelism: number
   codingModel: string
   docsModel: string
   logDir: string
