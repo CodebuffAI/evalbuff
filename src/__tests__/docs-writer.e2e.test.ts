@@ -20,7 +20,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   cleanupDraftedDocsChange,
   cleanupPlannedDocsTaskResult,
-  materializeDocsChangeFromPatch,
+  materializeDocsChange,
   planDocsChangesForTask,
 } from '../docs-writer'
 
@@ -142,7 +142,7 @@ describe('docs writer e2e', () => {
       const repoDir = createTestRepo()
       let completed = false
       let plannedResult: Awaited<ReturnType<typeof planDocsChangesForTask>> | null = null
-      let materializedDraft: ReturnType<typeof materializeDocsChangeFromPatch> | null = null
+      let materializedDraft: ReturnType<typeof materializeDocsChange> | null = null
 
       try {
         console.log(`Docs writer test repo: ${repoDir}`)
@@ -178,15 +178,16 @@ describe('docs writer e2e', () => {
 
         expect(accepted.accepted).toBe(true)
         expect(accepted.overfit).toBe(false)
-        expect(accepted.branchName).toBeString()
-        expect(accepted.commitSha).toBeString()
-        expect(accepted.patchText).toContain('docs/')
+        expect(accepted.fileChanges).toBeDefined()
+        expect(accepted.fileChanges?.length ?? 0).toBeGreaterThan(0)
+        const touchedDocsPath = accepted.fileChanges?.some((c) => c.path.startsWith('docs/'))
+        expect(touchedDocsPath).toBe(true)
         expect(accepted.diffText).toContain('APP_MODE')
 
-        materializedDraft = materializeDocsChangeFromPatch(repoDir, accepted.patchText || '')
+        materializedDraft = materializeDocsChange(repoDir, accepted.fileChanges || [])
         expect(materializedDraft).toBeDefined()
         if (!materializedDraft) {
-          throw new Error('failed to materialize accepted docs patch')
+          throw new Error('failed to materialize accepted docs change')
         }
         expect(materializedDraft.diffText).toContain('APP_CACHE_DIR')
 
@@ -200,8 +201,7 @@ describe('docs writer e2e', () => {
 
         expect(rejected.accepted).toBe(false)
         expect(rejected.overfit || rejected.reason.toLowerCase().includes('overfit')).toBe(true)
-        expect(rejected.branchName).toBeUndefined()
-        expect(rejected.commitSha).toBeUndefined()
+        expect(rejected.fileChanges).toBeUndefined()
 
         const status = execSync('git status --short', {
           cwd: repoDir,

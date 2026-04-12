@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from 'child_process'
+import { execSync } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -31,6 +31,12 @@ export interface DraftedDocsChange {
   diffText: string
 }
 
+export interface FileChange {
+  path: string
+  content?: string
+  delete?: boolean
+}
+
 export interface PlannedDocsChange {
   text: string
   priority: number
@@ -38,9 +44,7 @@ export interface PlannedDocsChange {
   accepted: boolean
   reason: string
   overfit: boolean
-  branchName?: string
-  commitSha?: string
-  patchText?: string
+  fileChanges?: FileChange[]
   diffText?: string
 }
 
@@ -49,6 +53,16 @@ export interface PlannedDocsTaskResult {
   repoDir: string
   baseCommit: string
   candidates: PlannedDocsChange[]
+}
+
+const ALLOWED_DOCS_ROOTS = ['docs/', 'AGENTS.md', 'CLAUDE.md']
+
+function isAllowedDocsPath(relPath: string): boolean {
+  const normalized = path.posix.normalize(relPath.replace(/\\/g, '/'))
+  if (normalized.startsWith('..') || path.isAbsolute(normalized)) return false
+  return ALLOWED_DOCS_ROOTS.some(
+    (root) => normalized === root || normalized.startsWith(root),
+  )
 }
 
 export const CODING_AGENT_SUGGESTIONS_FILE = 'evalbuff-coding-suggestions.json'
@@ -68,8 +82,8 @@ const DocsWriterPlanEntrySchema = z.object({
   accepted: z.boolean(),
   reason: z.string(),
   overfit: z.boolean().default(false),
-  branchName: z.string().optional(),
-  commitSha: z.string().optional(),
+  scratchDir: z.string().optional(),
+  deletedPaths: z.array(z.string()).default([]),
 })
 
 const DocsWriterPlanSchema = z.object({
@@ -287,20 +301,25 @@ You must reject a suggestion instead of editing docs when ANY of the following i
 
 ## Implementation workflow
 
+You will write each accepted candidate's changes into a per-candidate SCRATCH
+DIRECTORY. Do NOT modify the real docs/, AGENTS.md, or CLAUDE.md at any point.
+Do NOT run any git commands.
+
 1. Read the current docs first.
 2. Immediately create \`${DOCS_WRITER_PLAN_FILE}\` in the repo root with one entry per suggestion. Start with every entry marked \`accepted: false\` and a placeholder \`reason\`. Update this file as you make decisions. Do not wait until the end to create it.
 3. Evaluate every suggestion and decide whether it should be accepted.
-4. For each accepted suggestion:
-   - Run \`git checkout --quiet ${baseCommit}\`
-   - Run \`git checkout -B evalbuff-doc-change-N\`
-   - Implement exactly one independent docs change.
-   - Keep it general, reusable, and not overfit.
-   - Run \`git add docs AGENTS.md CLAUDE.md\`
-   - Run \`git commit -m "evalbuff: doc change N"\`
-   - Record the branch name and commit SHA in \`${DOCS_WRITER_PLAN_FILE}\`
-   - Run \`git checkout --quiet ${baseCommit}\` before moving to the next suggestion so branches stay independent.
-5. For each rejected suggestion, make no docs changes and record the rejection reason in \`${DOCS_WRITER_PLAN_FILE}\`.
-6. Before finishing, ensure HEAD is back at \`${baseCommit}\`.
+4. For each ACCEPTED suggestion N (N starts at 1):
+   - Work inside \`evalbuff-candidates/candidate-N/\`. Mirror the real docs tree there.
+   - To MODIFY an existing docs file, first copy it into the scratch dir, then edit the copy. Example for \`docs/patterns/foo.md\`:
+     * \`mkdir -p evalbuff-candidates/candidate-N/docs/patterns\`
+     * \`cp docs/patterns/foo.md evalbuff-candidates/candidate-N/docs/patterns/foo.md\`
+     * edit \`evalbuff-candidates/candidate-N/docs/patterns/foo.md\`
+   - To MODIFY \`AGENTS.md\` or \`CLAUDE.md\`, copy to \`evalbuff-candidates/candidate-N/AGENTS.md\` (or \`CLAUDE.md\`) and edit the copy.
+   - To CREATE a new file, write it directly at \`evalbuff-candidates/candidate-N/<real-path>\`.
+   - To DELETE a file, do NOT delete the real file. Add its path to the candidate's \`deletedPaths\` list in \`${DOCS_WRITER_PLAN_FILE}\`.
+   - Record the scratch dir in the plan entry as \`scratchDir: "evalbuff-candidates/candidate-N"\`.
+   - Keep the change general, reusable, and not overfit.
+5. For each REJECTED suggestion, make no changes and record the rejection reason in \`${DOCS_WRITER_PLAN_FILE}\`.
 
 ## Required output shape
 
@@ -314,8 +333,8 @@ You must reject a suggestion instead of editing docs when ANY of the following i
       "accepted": true,
       "reason": "Why this is broadly useful and not overfit",
       "overfit": false,
-      "branchName": "evalbuff-doc-change-1",
-      "commitSha": "abc123"
+      "scratchDir": "evalbuff-candidates/candidate-1",
+      "deletedPaths": []
     },
     {
       "text": "another suggestion",
@@ -323,16 +342,20 @@ You must reject a suggestion instead of editing docs when ANY of the following i
       "source": "agent",
       "accepted": false,
       "reason": "Rejected because this is overfit to one task",
-      "overfit": true
+      "overfit": true,
+      "deletedPaths": []
     }
   ]
 }
 \`\`\`
 
 Rules:
-- ONLY modify docs/, AGENTS.md, or CLAUDE.md.
+- ONLY write files under \`evalbuff-candidates/candidate-N/docs/\`, \`evalbuff-candidates/candidate-N/AGENTS.md\`, or \`evalbuff-candidates/candidate-N/CLAUDE.md\`.
+- Do NOT modify the real docs/, AGENTS.md, or CLAUDE.md.
 - Do NOT modify source code.
-- Every accepted branch must stand on its own when diffed against \`${baseCommit}\`.
+- Do NOT run git commands.
+- Mirror real file paths EXACTLY under the scratch dir. The relative layout inside \`evalbuff-candidates/candidate-N/\` must match where the files live in the repo.
+- Each candidate's scratch dir must stand on its own. Do not share files between candidates — if two candidates both touch \`AGENTS.md\`, each candidate copies it into its own scratch dir independently.
 - Keep AGENTS.md changes limited to doc-index maintenance or factual corrections.
 - Verify referenced helpers, scripts, file paths, and symbols against the codebase before documenting them.
 - Do not document aspirational behavior.
@@ -358,29 +381,28 @@ Rules:
     const candidates: PlannedDocsChange[] = []
     for (const entry of parsed.data.candidates) {
       const planned: PlannedDocsChange = {
-        ...entry,
+        text: entry.text,
+        priority: entry.priority,
+        source: entry.source,
+        accepted: entry.accepted,
+        reason: entry.reason,
+        overfit: entry.overfit,
       }
 
-      if (entry.accepted && entry.branchName) {
-        try {
-          const patchText = execFileSync(
-            'git',
-            ['diff', '--binary', `${baseCommit}..${entry.branchName}`, '--', 'docs', 'AGENTS.md', 'CLAUDE.md'],
-            { cwd: repoDir, encoding: 'utf-8' },
-          )
-          execFileSync('git', ['checkout', '--quiet', entry.branchName], { cwd: repoDir, stdio: 'ignore' })
-          const before = getDocsSnapshot(repoPath)
-          const after = getDocsSnapshot(repoDir)
-          const diffText = computeDocsDiffText(before, after)
-          execFileSync('git', ['checkout', '--quiet', baseCommit], { cwd: repoDir, stdio: 'ignore' })
-          planned.patchText = patchText
-          planned.diffText = diffText
-        } catch {
+      if (entry.accepted) {
+        const fileChanges = buildFileChangesFromScratch(
+          repoDir,
+          entry.scratchDir,
+          entry.deletedPaths,
+        )
+        if (fileChanges.length === 0) {
           planned.accepted = false
-          planned.reason = `Rejected because the committed docs change could not be extracted: ${planned.reason}`
-          planned.overfit = planned.overfit || false
-          delete planned.branchName
-          delete planned.commitSha
+          planned.reason = `Rejected because the docs writer produced no scratch-dir files for this candidate: ${planned.reason}`
+        } else {
+          planned.fileChanges = fileChanges
+          const before = getDocsSnapshot(repoPath)
+          const after = applyFileChangesToSnapshot(before, fileChanges)
+          planned.diffText = computeDocsDiffText(before, after)
         }
       }
 
@@ -403,9 +425,63 @@ export function cleanupPlannedDocsTaskResult(result: PlannedDocsTaskResult): voi
   }
 }
 
-export function materializeDocsChangeFromPatch(
+function buildFileChangesFromScratch(
+  repoDir: string,
+  scratchDir: string | undefined,
+  deletedPaths: string[],
+): FileChange[] {
+  const changes: FileChange[] = []
+  const seen = new Set<string>()
+
+  if (scratchDir) {
+    const scratchRoot = path.join(repoDir, scratchDir)
+    if (fs.existsSync(scratchRoot) && fs.statSync(scratchRoot).isDirectory()) {
+      const walk = (dir: string, prefix: string): void => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const fullPath = path.join(dir, entry.name)
+          const rel = prefix ? path.posix.join(prefix, entry.name) : entry.name
+          if (entry.isDirectory()) {
+            walk(fullPath, rel)
+          } else if (entry.isFile()) {
+            if (!isAllowedDocsPath(rel)) continue
+            const content = fs.readFileSync(fullPath, 'utf-8')
+            changes.push({ path: rel, content })
+            seen.add(rel)
+          }
+        }
+      }
+      walk(scratchRoot, '')
+    }
+  }
+
+  for (const p of deletedPaths) {
+    const normalized = path.posix.normalize(p.replace(/\\/g, '/'))
+    if (!isAllowedDocsPath(normalized) || seen.has(normalized)) continue
+    changes.push({ path: normalized, delete: true })
+    seen.add(normalized)
+  }
+
+  return changes
+}
+
+function applyFileChangesToSnapshot(
+  before: Record<string, string>,
+  fileChanges: FileChange[],
+): Record<string, string> {
+  const after: Record<string, string> = { ...before }
+  for (const change of fileChanges) {
+    if (change.delete) {
+      delete after[change.path]
+    } else if (change.content !== undefined) {
+      after[change.path] = change.content
+    }
+  }
+  return after
+}
+
+export function materializeDocsChange(
   repoPath: string,
-  patchText: string,
+  fileChanges: FileChange[],
 ): DraftedDocsChange | null {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-docs-materialized-'))
   const repoDir = path.join(tempDir, 'repo')
@@ -421,19 +497,20 @@ export function materializeDocsChangeFromPatch(
     copyDocsIntoRepo(repoPath, repoDir)
 
     const before = getDocsSnapshot(repoDir)
-    const patchPath = path.join(tempDir, 'docs-change.patch')
-    fs.writeFileSync(patchPath, patchText.endsWith('\n') ? patchText : patchText + '\n')
 
-    try {
-      execFileSync('git', ['apply', '--whitespace=nowarn', '--allow-empty', patchPath], {
-        cwd: repoDir,
-        stdio: 'ignore',
-      })
-    } catch {
-      execFileSync('git', ['apply', '--3way', '--whitespace=nowarn', patchPath], {
-        cwd: repoDir,
-        stdio: 'ignore',
-      })
+    for (const change of fileChanges) {
+      if (!isAllowedDocsPath(change.path)) continue
+      const fullPath = path.join(repoDir, change.path)
+      if (change.delete) {
+        try {
+          fs.rmSync(fullPath, { force: true })
+        } catch {
+          // ignore
+        }
+      } else if (change.content !== undefined) {
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true })
+        fs.writeFileSync(fullPath, change.content)
+      }
     }
 
     const after = getDocsSnapshot(repoDir)
