@@ -25,7 +25,7 @@ import {
   collectTaskDocSuggestions,
   DEFAULT_DOC_SUGGESTION_PRIORITY_FLOOR,
   filterDocSuggestionsForPlanning,
-  materializeDocsChangeFromPatch,
+  materializeDocsChange,
   planDocsChangesForTask,
   runPromptWriterAgent,
 } from './docs-writer'
@@ -63,7 +63,6 @@ export interface EvalbuffOptions {
 }
 
 const DOC_CHANGE_ACCEPTANCE_THRESHOLD = 0.5
-const DOC_CHANGE_FAST_ACCEPT_THRESHOLD = DOC_CHANGE_ACCEPTANCE_THRESHOLD * 2
 const CARVE_PARALLELISM = 10
 
 /** Ensure an entry exists in the repo's .gitignore. Creates the file if needed. */
@@ -88,35 +87,20 @@ function getErrorMessage(error: unknown): string {
 export function evaluateDocChangeGate(args: {
   baseScore: number
   rejudgeScore: number
-  rerunScore?: number
+  rerunScore: number
   threshold?: number
-  fastAcceptThreshold?: number
 }): {
   accepted: boolean
-  fastAccepted: boolean
-  status: 'accepted' | 'accepted_fast_rejudge' | 'rejected'
+  status: 'accepted' | 'rejected'
   gateDelta: number
   reason: string
 } {
   const threshold = args.threshold ?? DOC_CHANGE_ACCEPTANCE_THRESHOLD
-  const fastAcceptThreshold = args.fastAcceptThreshold ?? DOC_CHANGE_FAST_ACCEPT_THRESHOLD
-  const rejudgeDrop = args.baseScore - args.rejudgeScore
+  const gateDelta = args.rerunScore - args.rejudgeScore
 
-  if (rejudgeDrop >= fastAcceptThreshold) {
+  if (gateDelta >= threshold) {
     return {
       accepted: true,
-      fastAccepted: true,
-      status: 'accepted_fast_rejudge',
-      gateDelta: rejudgeDrop,
-      reason: `Accepted without rerun because rejudge dropped by ${rejudgeDrop.toFixed(1)}.`,
-    }
-  }
-
-  const gateDelta = (args.rerunScore ?? Number.NEGATIVE_INFINITY) - args.rejudgeScore
-  if ((args.rerunScore ?? Number.NEGATIVE_INFINITY) - args.rejudgeScore >= threshold) {
-    return {
-      accepted: true,
-      fastAccepted: false,
       status: 'accepted',
       gateDelta,
       reason: `Accepted because rerun minus rejudge was ${gateDelta.toFixed(1)}.`,
@@ -125,7 +109,6 @@ export function evaluateDocChangeGate(args: {
 
   return {
     accepted: false,
-    fastAccepted: false,
     status: 'rejected',
     gateDelta,
     reason: `Rejected because rerun minus rejudge was ${gateDelta.toFixed(1)}.`,
@@ -372,7 +355,7 @@ type GateDocsChangesDeps = {
   collectTaskDocSuggestions: typeof collectTaskDocSuggestions
   filterDocSuggestionsForPlanning: typeof filterDocSuggestionsForPlanning
   planDocsChangesForTask: typeof planDocsChangesForTask
-  materializeDocsChangeFromPatch: typeof materializeDocsChangeFromPatch
+  materializeDocsChange: typeof materializeDocsChange
   cleanupDraftedDocsChange: typeof cleanupDraftedDocsChange
   acceptDraftedDocsChange: typeof acceptDraftedDocsChange
   cleanupPlannedDocsTaskResult: typeof cleanupPlannedDocsTaskResult
@@ -385,7 +368,7 @@ const defaultGateDocsChangesDeps: GateDocsChangesDeps = {
   collectTaskDocSuggestions,
   filterDocSuggestionsForPlanning,
   planDocsChangesForTask,
-  materializeDocsChangeFromPatch,
+  materializeDocsChange,
   cleanupDraftedDocsChange,
   acceptDraftedDocsChange,
   cleanupPlannedDocsTaskResult,
@@ -460,7 +443,6 @@ export async function gateDocsChangesForTask(args: {
         priority: skipped.priority,
         text: skipped.text,
         accepted: false,
-        fastAccepted: false,
         status: 'skipped_low_priority',
         reason: `Skipped before docs writing because priority ${skipped.priority} is below ${DEFAULT_DOC_SUGGESTION_PRIORITY_FLOOR}.`,
         baseScore: args.task.score,
@@ -493,7 +475,6 @@ export async function gateDocsChangesForTask(args: {
           priority: suggestion.priority,
           text: suggestion.text,
           accepted: false,
-          fastAccepted: false,
           status: 'rejected_writer_failed',
           reason: 'Docs writer failed to produce a candidate plan.',
           baseScore: args.task.score,
@@ -518,46 +499,39 @@ export async function gateDocsChangesForTask(args: {
           priority: suggestion.priority,
           text: suggestion.text,
           accepted: false,
-          fastAccepted: false,
           status: suggestion.overfit ? 'rejected_overfit' : 'rejected',
           reason: suggestion.reason,
           baseScore: args.task.score,
           docsDiff: suggestion.diffText || '',
-        }, {
-          docsPatchText: suggestion.patchText,
         })
         continue
       }
 
-      if (!suggestion.patchText) {
+      if (!suggestion.fileChanges || suggestion.fileChanges.length === 0) {
         recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
           accepted: false,
-          fastAccepted: false,
           status: 'rejected_no_change',
-          reason: `Rejected because the planned docs change had no reusable patch: ${suggestion.reason}`,
+          reason: `Rejected because the planned docs change produced no file changes: ${suggestion.reason}`,
           baseScore: args.task.score,
           docsDiff: suggestion.diffText || '',
         })
         continue
       }
 
-      const draft = deps.materializeDocsChangeFromPatch(args.opts.repoPath, suggestion.patchText)
+      const draft = deps.materializeDocsChange(args.opts.repoPath, suggestion.fileChanges)
       if (!draft) {
         recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
           accepted: false,
-          fastAccepted: false,
           status: 'rejected_writer_failed',
           reason: `Failed to materialize docs change: ${suggestion.reason}`,
           baseScore: args.task.score,
           docsDiff: suggestion.diffText || '',
-        }, {
-          docsPatchText: suggestion.patchText,
         })
         continue
       }
@@ -569,21 +543,16 @@ export async function gateDocsChangesForTask(args: {
           priority: suggestion.priority,
           text: suggestion.text,
           accepted: false,
-          fastAccepted: false,
           status: 'rejected_no_change',
           reason: 'The planned docs change produced no effective diff when applied to the current docs.',
           baseScore: args.task.score,
           docsDiff: draft.diffText,
-        }, {
-          docsPatchText: suggestion.patchText,
         })
         continue
       }
 
-      let rejudgeScore: number | undefined
-      let rejudgeJudging: Awaited<ReturnType<typeof rejudgeTaskWithCurrentDocs>> | undefined
-      try {
-        const rejudged = await deps.rejudgeTaskWithCurrentDocs({
+      const [rejudgeSettled, rerunSettled] = await Promise.allSettled([
+        deps.rejudgeTaskWithCurrentDocs({
           idx: 0,
           total: 1,
           repoPath: args.opts.repoPath,
@@ -592,105 +561,83 @@ export async function gateDocsChangesForTask(args: {
           groundTruthDiff: args.groundTruthDiffs.get(args.feature.id) || '',
           initCommand: args.opts.initCommand,
           docsSourcePath: draft.repoDir,
-        })
-        rejudgeJudging = rejudged
-        rejudgeScore = rejudged.overallScore
-      } catch (error) {
+        }),
+        deps.runAgentOnCarve({
+          idx: 0,
+          total: 1,
+          repoPath: args.opts.repoPath,
+          feature: args.feature,
+          initCommand: args.opts.initCommand,
+          model: args.opts.codingModel,
+          groundTruthDiff: args.groundTruthDiffs.get(args.feature.id) || '',
+          docsSourcePath: draft.repoDir,
+        }),
+      ])
+
+      const rerunTask = rerunSettled.status === 'fulfilled' ? rerunSettled.value : undefined
+      if (rerunTask) validationCost += rerunTask.costEstimate
+
+      if (rejudgeSettled.status === 'rejected') {
         deps.cleanupDraftedDocsChange(draft)
-        const msg = error instanceof Error ? error.message : String(error)
+        const msg = getErrorMessage(rejudgeSettled.reason)
         recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
           accepted: false,
-          fastAccepted: false,
           status: 'rejected_rejudge_failed',
           reason: `Rejudge failed: ${msg.slice(0, 200)}`,
           baseScore: args.task.score,
+          rerunScore: rerunTask?.score,
           docsDiff: draft.diffText,
         }, {
-          docsPatchText: suggestion.patchText,
+          rerunTask,
         })
         continue
       }
 
-      if (rejudgeScore === undefined) {
+      const rejudgeJudging = rejudgeSettled.value
+      const rejudgeScore = rejudgeJudging.overallScore
+
+      if (rerunSettled.status === 'rejected') {
         deps.cleanupDraftedDocsChange(draft)
+        const msg = getErrorMessage(rerunSettled.reason)
         recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
           accepted: false,
-          fastAccepted: false,
-          status: 'rejected_rejudge_failed',
-          reason: 'Rejudge did not produce a score.',
-          baseScore: args.task.score,
-          docsDiff: draft.diffText,
-        }, {
-          docsPatchText: suggestion.patchText,
-        })
-        continue
-      }
-
-      const fastDecision = evaluateDocChangeGate({
-        baseScore: args.task.score,
-        rejudgeScore,
-      })
-      if (fastDecision.accepted && fastDecision.fastAccepted) {
-        deps.acceptDraftedDocsChange(args.opts.repoPath, draft)
-        recordCandidate({
-          source: suggestion.source,
-          priority: suggestion.priority,
-          text: suggestion.text,
-          accepted: fastDecision.accepted,
-          fastAccepted: fastDecision.fastAccepted,
-          status: fastDecision.status,
-          reason: `${suggestion.reason} ${fastDecision.reason}`.trim(),
+          status: 'rejected_rerun_failed',
+          reason: `Rerun failed: ${msg.slice(0, 200)}`,
           baseScore: args.task.score,
           rejudgeScore,
-          gateDelta: fastDecision.gateDelta,
           docsDiff: draft.diffText,
         }, {
-          docsPatchText: suggestion.patchText,
           rejudgeJudging,
         })
         continue
       }
 
-      const rerunTask = await deps.runAgentOnCarve({
-        idx: 0,
-        total: 1,
-        repoPath: args.opts.repoPath,
-        feature: args.feature,
-        initCommand: args.opts.initCommand,
-        model: args.opts.codingModel,
-        groundTruthDiff: args.groundTruthDiffs.get(args.feature.id) || '',
-        docsSourcePath: draft.repoDir,
-      })
-      validationCost += rerunTask.costEstimate
-
       const decision = evaluateDocChangeGate({
         baseScore: args.task.score,
         rejudgeScore,
-        rerunScore: rerunTask.score,
+        rerunScore: rerunTask!.score,
       })
-      if (rerunTask.score >= 0 && decision.accepted) {
+      if (rerunTask!.score >= 0 && decision.accepted) {
         deps.acceptDraftedDocsChange(args.opts.repoPath, draft)
         recordCandidate({
           source: suggestion.source,
           priority: suggestion.priority,
           text: suggestion.text,
-          accepted: decision.accepted,
-          fastAccepted: decision.fastAccepted,
+          accepted: true,
           status: decision.status,
           reason: `${suggestion.reason} ${decision.reason}`.trim(),
           baseScore: args.task.score,
           rejudgeScore,
-          rerunScore: rerunTask.score,
+          rerunScore: rerunTask!.score,
           gateDelta: decision.gateDelta,
           docsDiff: draft.diffText,
         }, {
-          docsPatchText: suggestion.patchText,
           rejudgeJudging,
           rerunTask,
         })
@@ -703,18 +650,16 @@ export async function gateDocsChangesForTask(args: {
         priority: suggestion.priority,
         text: suggestion.text,
         accepted: false,
-        fastAccepted: false,
-        status: rerunTask.score < 0 ? 'rejected_rerun_failed' : 'rejected',
-        reason: rerunTask.score < 0
+        status: rerunTask!.score < 0 ? 'rejected_rerun_failed' : 'rejected',
+        reason: rerunTask!.score < 0
           ? `Rejected because the validation rerun failed. ${suggestion.reason}`.trim()
           : `${suggestion.reason} ${decision.reason}`.trim(),
         baseScore: args.task.score,
         rejudgeScore,
-        rerunScore: rerunTask.score,
+        rerunScore: rerunTask!.score,
         gateDelta: decision.gateDelta,
         docsDiff: draft.diffText,
       }, {
-        docsPatchText: suggestion.patchText,
         rejudgeJudging,
         rerunTask,
       })
@@ -910,7 +855,6 @@ export async function runEvalbuff(opts: EvalbuffOptions): Promise<void> {
     const loopDocGateResult: LoopDocGateResult = {
       loop: improvementRound,
       threshold: DOC_CHANGE_ACCEPTANCE_THRESHOLD,
-      fastAcceptThreshold: DOC_CHANGE_FAST_ACCEPT_THRESHOLD,
       features: featureGateResults,
     }
     loopDocGateResults.push(loopDocGateResult)

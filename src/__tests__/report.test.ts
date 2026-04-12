@@ -53,7 +53,6 @@ describe('saveLoopDocGateArtifacts', () => {
               priority: 80,
               text: 'Document env setup for config-sensitive tests',
               accepted: true,
-              fastAccepted: false,
               status: 'accepted',
               reason: 'Reusable and verified',
               baseScore: 6,
@@ -62,7 +61,6 @@ describe('saveLoopDocGateArtifacts', () => {
               gateDelta: 0.9,
               docsDiff: '--- a/docs/testing.md\n+++ b/docs/testing.md\n+Set APP_MODE=test\n',
             },
-            docsPatchText: 'diff --git a/docs/testing.md b/docs/testing.md\n--- a/docs/testing.md\n+++ b/docs/testing.md\n@@ -1 +1,2 @@\n # Testing\n+Set APP_MODE=test\n',
             rejudgeJudging: {
               analysis: 'More discerning with updated docs.',
               strengths: [],
@@ -106,7 +104,7 @@ describe('saveLoopDocGateArtifacts', () => {
     const candidateDir = path.join(logDir, 'doc-candidates-loop-1', 'feature-a', 'candidate-01')
     expect(fs.existsSync(candidateDir)).toBe(true)
     expect(fs.readFileSync(path.join(candidateDir, 'suggestion.txt'), 'utf-8')).toContain('Document env setup')
-    expect(fs.readFileSync(path.join(candidateDir, 'docs.patch'), 'utf-8')).toContain('diff --git')
+    expect(fs.existsSync(path.join(candidateDir, 'docs.patch'))).toBe(false)
     expect(fs.readFileSync(path.join(candidateDir, 'docs-diff.txt'), 'utf-8')).toContain('APP_MODE=test')
 
     const metadata = JSON.parse(fs.readFileSync(path.join(candidateDir, 'metadata.json'), 'utf-8'))

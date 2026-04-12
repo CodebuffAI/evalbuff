@@ -51,19 +51,6 @@ describe('evaluateDocChangeGate', () => {
     events.clearBuffer()
   })
 
-  it('fast-accepts when the rejudge score drops by at least twice the normal threshold', () => {
-    const result = evaluateDocChangeGate({
-      baseScore: 6,
-      rejudgeScore: 5,
-    })
-
-    expect(result.accepted).toBe(true)
-    expect(result.fastAccepted).toBe(true)
-    expect(result.status).toBe('accepted_fast_rejudge')
-    expect(result.gateDelta).toBeCloseTo(1, 6)
-    expect(result.reason).toBe('Accepted without rerun because rejudge dropped by 1.0.')
-  })
-
   it('accepts when rerun minus rejudge clears the threshold', () => {
     const result = evaluateDocChangeGate({
       baseScore: 6,
@@ -72,7 +59,6 @@ describe('evaluateDocChangeGate', () => {
     })
 
     expect(result.accepted).toBe(true)
-    expect(result.fastAccepted).toBe(false)
     expect(result.status).toBe('accepted')
     expect(result.gateDelta).toBeCloseTo(0.6, 6)
     expect(result.reason).toBe('Accepted because rerun minus rejudge was 0.6.')
@@ -86,7 +72,6 @@ describe('evaluateDocChangeGate', () => {
     })
 
     expect(result.accepted).toBe(false)
-    expect(result.fastAccepted).toBe(false)
     expect(result.status).toBe('rejected')
     expect(result.gateDelta).toBeCloseTo(0.3, 6)
     expect(result.reason).toBe('Rejected because rerun minus rejudge was 0.3.')
@@ -158,12 +143,14 @@ describe('evaluateDocChangeGate', () => {
               text: 'Document the rerun gate',
               reason: 'Useful guidance',
               overfit: false,
-              patchText: 'patch',
+              fileChanges: [
+                { path: 'docs/guide.md', content: '# Guide\nRerun gate.\n' },
+              ],
               diffText: '--- a/docs/guide.md\n+++ b/docs/guide.md\n',
             },
           ],
         }),
-        materializeDocsChangeFromPatch: () => ({
+        materializeDocsChange: () => ({
           tempDir: '/tmp/draft-docs',
           repoDir: '/tmp/draft-docs',
           before: {},

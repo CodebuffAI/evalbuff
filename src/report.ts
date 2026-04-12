@@ -19,10 +19,8 @@ export interface DocChangeGateCandidateResult {
   priority: number
   text: string
   accepted: boolean
-  fastAccepted: boolean
   status:
     | 'accepted'
-    | 'accepted_fast_rejudge'
     | 'rejected'
     | 'rejected_overfit'
     | 'rejected_no_change'
@@ -46,7 +44,6 @@ export interface FeatureDocGateResult {
 
 export interface DocChangeGateCandidateArtifacts {
   summary: DocChangeGateCandidateResult
-  docsPatchText?: string
   rejudgeJudging?: JudgingResult
   rerunTask?: TaskResult
 }
@@ -59,7 +56,6 @@ export interface FeatureDocGateArtifacts {
 export interface LoopDocGateResult {
   loop: number
   threshold: number
-  fastAcceptThreshold: number
   features: FeatureDocGateResult[]
 }
 
@@ -150,10 +146,6 @@ export function saveLoopDocGateArtifacts(
 
       fs.writeFileSync(path.join(candidateDir, 'metadata.json'), JSON.stringify(candidate.summary, null, 2))
       fs.writeFileSync(path.join(candidateDir, 'suggestion.txt'), candidate.summary.text + '\n')
-
-      if (candidate.docsPatchText && candidate.docsPatchText.trim()) {
-        fs.writeFileSync(path.join(candidateDir, 'docs.patch'), candidate.docsPatchText)
-      }
 
       if (candidate.summary.docsDiff.trim()) {
         fs.writeFileSync(path.join(candidateDir, 'docs-diff.txt'), candidate.summary.docsDiff)
